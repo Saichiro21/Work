@@ -1,12 +1,13 @@
-from app.db.crud import get_all_categories, get_all_books
+from fastapi import FastAPI
 
-categories = get_all_categories()
-books = get_all_books()
+from app.api import categories, books
 
-print("=== Категории ===")
-for c in categories:
-    print(f"{c.id}: {c.title}")
+app = FastAPI(title="Books API")
 
-print("\n=== Книги ===")
-for b in books:
-    print(f"{b.id}: {b.title} | {b.price}$ | категория: {b.category.title}")
+app.include_router(categories.router)
+app.include_router(books.router)
+
+
+@app.get("/health")
+def health_check():
+    return {"status": "ok"}
