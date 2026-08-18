@@ -1,6 +1,6 @@
 from pydantic import BaseModel
 from typing import Optional
-
+from decimal import Decimal
 
 class CategoryBase(BaseModel):
     title: str
@@ -20,7 +20,7 @@ class CategoryResponse(CategoryBase):
 class BookBase(BaseModel):
     title: str
     description: Optional[str] = None
-    price: float
+    price: Decimal
     url: Optional[str] = ""
     category_id: int
 
