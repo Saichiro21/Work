@@ -4,6 +4,7 @@ from aiogram import Bot, Router
 from aiogram.types import Message
 
 from app.collector.saver import message_text, naive_utc, save_message
+from app.collector.service import save_service_events
 from app.db import crud
 from app.db.db import SessionLocal
 from app.db.models import Chat
@@ -26,6 +27,9 @@ def _is_collected(message: Message, allowed_chat_ids):
 @router.message()
 async def on_message(message: Message, bot: Bot, allowed_chat_ids: set):
     if not _is_collected(message, allowed_chat_ids):
+        return
+    # Служебные сообщения идут тем же потоком, но перепиской не являются
+    if save_service_events(message):
         return
     await save_message(bot, message)
 

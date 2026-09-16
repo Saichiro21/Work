@@ -18,6 +18,7 @@ from app.admin_bot.handlers.common import (
     PeriodError,
     accept_chat,
     chats_overview,
+    close_screen,
     format_datetime,
     format_day,
     open_chat_question,
@@ -213,11 +214,11 @@ async def receive_chat_id(message: Message, state: FSMContext, bot: Bot):
 
 
 @router.message(StateFilter(FilesStates.waiting_period))
-async def receive_period(message: Message, state: FSMContext):
+async def receive_period(message: Message, state: FSMContext, bot: Bot):
     try:
         date_from, date_to, label_from, label_to = parse_period(message.text)
     except PeriodError as error:
-        await message.answer(str(error))
+        await show_period_question(bot, message.chat.id, state, notice=str(error))
         return
 
     data = await state.get_data()
@@ -234,12 +235,12 @@ async def receive_period(message: Message, state: FSMContext):
 
     if not found:
         if problems:
-            await message.answer("Отправить нечего.\n" + "\n".join(problems))
+            notice = "Отправить нечего.\n" + "\n".join(problems)
         elif not messages:
-            await message.answer("За этот период сообщений не найдено.")
+            notice = "За этот период сообщений не найдено."
         else:
-            await message.answer("За этот период вложений нет.")
-        await state.clear()
+            notice = "За этот период вложений нет."
+        await show_period_question(bot, message.chat.id, state, notice=notice)
         return
 
     await message.answer(f"Собираю архив, вложений: {len(found)}")
@@ -265,4 +266,5 @@ async def receive_period(message: Message, state: FSMContext):
     if problems:
         await message.answer("\n".join(problems))
 
-    await state.clear()
+    # Экран с кнопкой «Назад» больше ни к чему не ведёт, убираем вместе с командой
+    await close_screen(bot, message.chat.id, state)
