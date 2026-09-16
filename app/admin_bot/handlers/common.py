@@ -235,8 +235,15 @@ async def show_chat_ids(bot, chat_id, state, states):
     return True
 
 
-async def show_period_question(bot, chat_id, state):
-    await edit_screen(bot, chat_id, state, PERIOD_PROMPT, period_keyboard())
+async def show_period_question(bot, chat_id, state, notice=None):
+    """Шаг с периодом.
+
+    В notice передают, чем закончилась прошлая попытка: неверный формат даты или
+    пустой результат. Диалог при этом остаётся на этом же шаге, чтобы период
+    можно было сразу назвать заново, не начиная с команды.
+    """
+    text = PERIOD_PROMPT if notice is None else f"{notice}\n\n{PERIOD_PROMPT}"
+    await edit_screen(bot, chat_id, state, text, period_keyboard())
 
 
 async def close_screen(bot, chat_id, state):
