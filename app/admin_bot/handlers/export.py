@@ -1,22 +1,33 @@
 import json
-import re
-from datetime import datetime, time
 
-from aiogram import Router
+from aiogram import Bot, F, Router
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import BufferedInputFile, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, Message
 
+from app.admin_bot.handlers.common import (
+    CHAT_CALLBACK_PREFIX,
+    CHAT_IDS_CALLBACK,
+    CHAT_LIST_CALLBACK,
+    CHAT_QUESTION_CALLBACK,
+    NO_CHATS_MESSAGE,
+    PeriodError,
+    accept_chat,
+    chats_overview,
+    format_datetime,
+    open_chat_question,
+    parse_period,
+    sender_name,
+    show_chat_ids,
+    show_chat_list,
+    show_chat_question,
+    show_period_question,
+)
 from app.db.crud import get_messages_by_period
 from app.db.db import SessionLocal
-from app.db.models import Chat
 
 router = Router()
-
-PERIOD_PATTERN = re.compile(
-    r"^(\d{4}-\d{2}-\d{2})\s*-\s*(\d{4}-\d{2}-\d{2})$"
-)
 
 
 class ExportStates(StatesGroup):
@@ -24,25 +35,12 @@ class ExportStates(StatesGroup):
     waiting_period = State()
 
 
-def _sender_name(user):
-    if user is None:
-        return None
-    parts = [user.first_name, user.last_name]
-    name = " ".join(part for part in parts if part)
-    if user.username:
-        if name:
-            return f"{name} (@{user.username})"
-        return f"@{user.username}"
-    return name or str(user.telegram_user_id)
-
-
 def _serialize_message(message):
     return {
-        "отправитель": _sender_name(message.user),
+        "отправитель": sender_name(message.user),
         "текст": message.text,
-        "дата отправки": message.sent_at.isoformat() if message.sent_at else None,
+        "дата отправки": format_datetime(message.sent_at),
         "была ли отредактирована": message.edited_at is not None,
-        "список реакций": [reaction.emoji for reaction in message.reactions],
         "список вложений": [
             {
                 "file_type": attachment.file_type,
@@ -54,79 +52,84 @@ def _serialize_message(message):
     }
 
 
-@router.message(Command("start"))
-async def cmd_start(message: Message, state: FSMContext):
-    await state.clear()
-    await message.answer(
-        "Привет! Это бот для выгрузки корпоративных переписок.\n"
-        "Команда /export сформирует JSON-файл с сообщениями выбранного чата за период."
-    )
-
-
-@router.message(Command("export"))
+@router.message(Command("export", ignore_case=True))
 async def cmd_export(message: Message, state: FSMContext):
-    await state.set_state(ExportStates.waiting_chat_id)
-    await message.answer("Из какого чата выгрузить данные? Отправьте telegram_chat_id")
+    if not chats_overview():
+        await state.clear()
+        await message.answer(NO_CHATS_MESSAGE)
+        return
+
+    await open_chat_question(message, state, ExportStates)
+
+
+@router.callback_query(
+    StateFilter(ExportStates.waiting_chat_id),
+    F.data == CHAT_LIST_CALLBACK,
+)
+async def show_list(callback: CallbackQuery, state: FSMContext, bot: Bot):
+    if not await show_chat_list(bot, callback.from_user.id, state, ExportStates):
+        await callback.answer(NO_CHATS_MESSAGE, show_alert=True)
+        return
+    await callback.answer()
+
+
+@router.callback_query(
+    StateFilter(ExportStates.waiting_chat_id),
+    F.data == CHAT_IDS_CALLBACK,
+)
+async def show_ids(callback: CallbackQuery, state: FSMContext, bot: Bot):
+    if not await show_chat_ids(bot, callback.from_user.id, state, ExportStates):
+        await callback.answer(NO_CHATS_MESSAGE, show_alert=True)
+        return
+    await callback.answer()
+
+
+@router.callback_query(
+    StateFilter(ExportStates.waiting_chat_id, ExportStates.waiting_period),
+    F.data == CHAT_QUESTION_CALLBACK,
+)
+async def back_to_question(callback: CallbackQuery, state: FSMContext, bot: Bot):
+    await show_chat_question(bot, callback.from_user.id, state, ExportStates)
+    await callback.answer()
+
+
+@router.callback_query(
+    StateFilter(ExportStates.waiting_chat_id),
+    F.data.startswith(CHAT_CALLBACK_PREFIX),
+)
+async def choose_chat(callback: CallbackQuery, state: FSMContext, bot: Bot):
+    telegram_chat_id = int(callback.data.removeprefix(CHAT_CALLBACK_PREFIX))
+    if not await accept_chat(state, telegram_chat_id, ExportStates.waiting_period):
+        await callback.answer("Этого чата уже нет в базе", show_alert=True)
+        return
+
+    await callback.answer()
+    await show_period_question(bot, callback.from_user.id, state)
 
 
 @router.message(StateFilter(ExportStates.waiting_chat_id))
-async def receive_chat_id(message: Message, state: FSMContext):
-    text = (message.text or "").strip()
+async def receive_chat_id(message: Message, state: FSMContext, bot: Bot):
     try:
-        telegram_chat_id = int(text)
+        telegram_chat_id = int((message.text or "").strip())
     except ValueError:
-        await message.answer("Нужно отправить число — telegram_chat_id чата.")
+        await message.answer("Выберите чат кнопкой или отправьте его telegram_chat_id.")
         return
 
-    db = SessionLocal()
-    try:
-        chat = (
-            db.query(Chat)
-            .filter(Chat.telegram_chat_id == telegram_chat_id)
-            .first()
-        )
-        if chat is None:
-            await message.answer("Чат с таким telegram_chat_id не найден в базе.")
-            return
-        chat_pk = chat.id
-        chat_title = chat.title
-    finally:
-        db.close()
+    if not await accept_chat(state, telegram_chat_id, ExportStates.waiting_period):
+        await message.answer("Чат с таким telegram_chat_id не найден в базе.")
+        return
 
-    await state.update_data(
-        chat_pk=chat_pk,
-        telegram_chat_id=telegram_chat_id,
-        chat_title=chat_title,
-    )
-    await state.set_state(ExportStates.waiting_period)
-    await message.answer(
-        "За какой период? Введите даты в формате ГГГГ-ММ-ДД - ГГГГ-ММ-ДД\n"
-        "например: 2026-08-01 - 2026-08-27"
-    )
+    await show_period_question(bot, message.chat.id, state)
 
 
 @router.message(StateFilter(ExportStates.waiting_period))
 async def receive_period(message: Message, state: FSMContext):
-    text = (message.text or "").strip()
-    match = PERIOD_PATTERN.match(text)
-    if not match:
-        await message.answer(
-            "Неверный формат. Введите даты так: ГГГГ-ММ-ДД - ГГГГ-ММ-ДД"
-        )
-        return
-
     try:
-        date_from = datetime.strptime(match.group(1), "%Y-%m-%d")
-        date_to_date = datetime.strptime(match.group(2), "%Y-%m-%d")
-    except ValueError:
-        await message.answer("Некорректная дата. Проверьте числа в диапазоне.")
+        date_from, date_to, label_from, label_to = parse_period(message.text)
+    except PeriodError as error:
+        await message.answer(str(error))
         return
 
-    if date_from.date() > date_to_date.date():
-        await message.answer("Дата начала не может быть позже даты окончания.")
-        return
-
-    date_to = datetime.combine(date_to_date.date(), time.max)
     data = await state.get_data()
     chat_pk = data["chat_pk"]
     telegram_chat_id = data["telegram_chat_id"]
@@ -138,10 +141,13 @@ async def receive_period(message: Message, state: FSMContext):
     finally:
         db.close()
 
+    if not payload:
+        await message.answer("За этот период сообщений не найдено.")
+        await state.clear()
+        return
+
     content = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
-    filename = (
-        f"export_{telegram_chat_id}_{match.group(1)}_{match.group(2)}.json"
-    )
+    filename = f"export_{telegram_chat_id}_{label_from}_{label_to}.json"
     document = BufferedInputFile(content, filename=filename)
 
     await message.answer_document(

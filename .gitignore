@@ -4,3 +4,11 @@ __pycache__/
 venv/
 .env
 .vscode/
+
+# Файлы сессий Telegram-аккаунтов дают полный доступ к аккаунту — в репозиторий их нельзя
+*.session
+*.session-journal
+
+# Скачанные вложения из чатов
+storage/attachments/*
+!storage/attachments/.gitkeep

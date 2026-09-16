@@ -6,6 +6,9 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from dotenv import load_dotenv
 
 from app.admin_bot.handlers.export import router as export_router
+from app.admin_bot.handlers.fallback import router as fallback_router
+from app.admin_bot.handlers.files import router as files_router
+from app.admin_bot.handlers.menu import router as menu_router
 from app.admin_bot.middlewares import AdminMiddleware
 from app.db.crud import add_admin
 from app.db.db import SessionLocal, init_tables
@@ -33,7 +36,12 @@ def create_admin_bot():
     bot = Bot(token=token)
     dp = Dispatcher(storage=MemoryStorage())
     dp.message.middleware(AdminMiddleware())
+    dp.callback_query.middleware(AdminMiddleware())
+    dp.include_router(menu_router)
     dp.include_router(export_router)
+    dp.include_router(files_router)
+    # Перехватывает всё подряд, поэтому строго последним
+    dp.include_router(fallback_router)
     return bot, dp
 
 
@@ -42,7 +50,11 @@ async def run_admin_bot():
     init_tables()
     _sync_admins_from_env()
     bot, dp = create_admin_bot()
-    await dp.start_polling(bot)
+    try:
+        # Остановкой управляет app/main.py, свои обработчики сигналов aiogram не нужны
+        await dp.start_polling(bot, handle_signals=False)
+    finally:
+        await bot.session.close()
 
 
 if __name__ == "__main__":
