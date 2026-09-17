@@ -1,0 +1,18 @@
+[Unit]
+Description=Сбор корпоративных переписок Telegram (collector + admin_bot)
+# Порядок с PostgreSQL здесь не задать: база — системная служба, а это
+# пользовательская, они живут в разных менеджерах. Если база ещё не поднялась,
+# запуск упадёт, и systemd повторит его через RestartSec — этого достаточно
+After=network-online.target
+
+[Service]
+WorkingDirectory=/home/sai/projects/work
+ExecStart=/home/sai/projects/work/venv/bin/python -m app.main
+# Сеть и Telegram отваливаются регулярно, служба должна подниматься сама
+Restart=always
+RestartSec=5
+# Иначе логи попадают в journalctl пачками, с задержкой в целый буфер
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target

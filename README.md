@@ -163,6 +163,46 @@ python -m app.collector.runner
 python -m app.admin_bot.bot
 ```
 
+### Автозапуск через systemd
+
+Запуск из терминала живёт ровно до закрытия окна, поэтому для постоянной работы
+в репозитории лежит готовая служба `deploy/telegram-archive.service`. Пути в ней
+указаны для `/home/sai/projects/work` — поправьте под себя.
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp deploy/telegram-archive.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now telegram-archive
+```
+
+Служба поднимается заново после любого падения — сеть и Telegram отваливаются
+регулярно, это нормальный режим работы. Состояние и логи:
+
+```bash
+systemctl --user status telegram-archive
+journalctl --user -u telegram-archive -f
+```
+
+Осталась одна команда, которую нужно выполнить от root: без неё пользовательские
+службы останавливаются, когда закрыт последний терминал.
+
+```bash
+sudo loginctl enable-linger $USER
+```
+
+В WSL нужен ещё включённый systemd — в `/etc/wsl.conf` должно быть:
+
+```ini
+[boot]
+systemd=true
+```
+
+После правки `wsl.conf` выполните в PowerShell `wsl --shutdown` и откройте
+терминал заново. PostgreSQL при этом должен запускаться сам
+(`sudo systemctl enable postgresql`), иначе бот будет перезапускаться по кругу,
+пока база не поднимется.
+
 ## Как выгрузить данные
 
 Напишите админскому боту в личку. Пользователям не из `ADMIN_IDS` бот не отвечает вообще.
@@ -377,6 +417,8 @@ app/
       fallback.py    подсказка в ответ на непонятный ввод
   paths.py           пути к каталогам проекта
   main.py            общая точка входа
+deploy/
+  telegram-archive.service  служба systemd для автозапуска
 storage/attachments/  скачанные вложения (в репозиторий не попадают)
 ```
 
