@@ -5,19 +5,18 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
-from app.admin_bot.handlers.common import MENU_CALLBACK, START_MESSAGE, close_screen
+from app.admin_bot.handlers.common import MENU_CALLBACK, open_menu, show_menu
 
 router = Router()
 
 
 @router.message(Command("start", ignore_case=True))
-async def cmd_start(message: Message, state: FSMContext):
-    await state.clear()
-    await message.answer(START_MESSAGE)
+async def cmd_start(message: Message, state: FSMContext, bot: Bot):
+    await open_menu(bot, message, state)
 
 
 @router.callback_query(F.data == MENU_CALLBACK)
 async def back_to_menu(callback: CallbackQuery, state: FSMContext, bot: Bot):
-    """«Назад» с первого экрана: диалог прерывается, переписка возвращается к меню."""
-    await close_screen(bot, callback.from_user.id, state)
+    """Выход из диалога: окно диалога закрывается, и на виду остаётся меню."""
+    await show_menu(bot, callback.from_user.id, state)
     await callback.answer()
