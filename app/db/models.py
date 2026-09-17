@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import (
     BigInteger,
@@ -14,13 +14,21 @@ from sqlalchemy.orm import relationship
 from app.db.db import Base
 
 
+def utc_now():
+    """Время в UTC без таймзоны — как хранят все колонки DateTime в проекте.
+
+    datetime.utcnow() для этого не годится: он объявлен устаревшим.
+    """
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
 class Chat(Base):
     __tablename__ = "chats"
 
     id = Column(Integer, primary_key=True)
     telegram_chat_id = Column(BigInteger, unique=True, nullable=False)
     title = Column(String)
-    added_at = Column(DateTime, default=datetime.utcnow)
+    added_at = Column(DateTime, default=utc_now)
 
     messages = relationship("Message", back_populates="chat")
     events = relationship("ChatEvent", back_populates="chat")
@@ -171,4 +179,4 @@ class Admin(Base):
 
     id = Column(Integer, primary_key=True)
     telegram_user_id = Column(BigInteger, unique=True, nullable=False)
-    added_at = Column(DateTime, default=datetime.utcnow)
+    added_at = Column(DateTime, default=utc_now)
