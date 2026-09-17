@@ -134,10 +134,16 @@ def get_messages_by_period(db: Session, chat_id, date_from, date_to):
     )
 
 
-def search_messages(db: Session, chat_id, keyword):
-    return (
+def search_messages(db: Session, chat_id, keyword, date_from=None, date_to=None):
+    """Сообщения чата, где встречается keyword. Границы периода необязательны.
+
+    Поиск идёт по подстроке без учёта регистра: ищут обычно слово или фразу,
+    а не точное совпадение целой строки.
+    """
+    query = (
         db.query(Message)
         .options(
+            joinedload(Message.user),
             joinedload(Message.attachments),
             joinedload(Message.reactions),
             joinedload(Message.versions),
@@ -146,9 +152,14 @@ def search_messages(db: Session, chat_id, keyword):
             Message.chat_id == chat_id,
             Message.text.ilike(f"%{keyword}%"),
         )
-        .order_by(Message.sent_at, Message.telegram_message_id)
-        .all()
     )
+
+    if date_from is not None:
+        query = query.filter(Message.sent_at >= date_from)
+    if date_to is not None:
+        query = query.filter(Message.sent_at <= date_to)
+
+    return query.order_by(Message.sent_at, Message.telegram_message_id).all()
 
 
 def update_message_text(db: Session, message_id, new_text, edited_at):
