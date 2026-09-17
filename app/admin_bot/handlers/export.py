@@ -12,17 +12,20 @@ from app.admin_bot.handlers.common import (
     CHAT_LIST_CALLBACK,
     CHAT_QUESTION_CALLBACK,
     NO_CHATS_MESSAGE,
+    PERIOD_CALLBACK,
     PeriodError,
     accept_chat,
     chats_overview,
-    close_screen,
+    delivered_keyboard,
+    finish_dialog,
     format_datetime,
-    open_chat_question,
+    open_dialog,
     parse_period,
     sender_name,
     show_chat_ids,
     show_chat_list,
     show_chat_question,
+    show_empty_result,
     show_period_question,
 )
 from app.db.crud import get_chat_events_by_period, get_messages_by_period
@@ -33,6 +36,13 @@ router = Router()
 
 # Текст родительского сообщения в ответе даём отрывком: целиком он и так есть в выгрузке
 REPLY_PREVIEW_LIMIT = 120
+
+# Пустые места в выгрузке подписываем словами: null и true/false читателю ни о чём
+# не говорят, а «нет» на месте текста можно принять за само сообщение
+NO_TEXT = "— без текста —"
+UNKNOWN_SENDER = "не определён"
+NOT_A_REPLY = "не ответ на сообщение"
+NOT_FORWARDED = "не пересылалось"
 
 FORWARD_ORIGIN_LABELS = {
     ForwardOriginType.USER: "пользователь",
@@ -58,22 +68,28 @@ class ExportStates(StatesGroup):
     waiting_period = State()
 
 
+def _yes_no(value):
+    """Выгрузку читают люди, а не программы: вместо true/false пишем словами."""
+    return "да" if value else "нет"
+
+
 def _reply_info(message, by_telegram_id):
     """Описание родительского сообщения. Его может не быть в выборке."""
     if message.reply_to_message_id is None:
-        return None
+        return NOT_A_REPLY
 
     info = {"telegram_message_id": message.reply_to_message_id}
     parent = by_telegram_id.get(message.reply_to_message_id)
     if parent is None:
+        info["примечание"] = "это сообщение не попало в выбранный период"
         return info
 
     preview = parent.text or ""
     if len(preview) > REPLY_PREVIEW_LIMIT:
         preview = preview[:REPLY_PREVIEW_LIMIT] + "…"
 
-    info["отправитель"] = sender_name(parent.user)
-    info["текст"] = preview or None
+    info["отправитель"] = sender_name(parent.user) or UNKNOWN_SENDER
+    info["текст"] = preview or NO_TEXT
     info["дата отправки"] = format_datetime(parent.sent_at)
     return info
 
@@ -81,15 +97,16 @@ def _reply_info(message, by_telegram_id):
 def _forward_info(message):
     """Откуда пришла пересылка. В «отправителе» стоит тот, кто переслал."""
     if message.forward_origin_type is None:
-        return None
+        return NOT_FORWARDED
 
     kind = message.forward_origin_type
     return {
         "тип источника": FORWARD_ORIGIN_LABELS.get(kind, kind),
-        "источник": message.forward_from_name,
-        "id источника": message.forward_from_id,
-        "дата оригинала": format_datetime(message.forward_origin_date),
-        "автопересылка из канала": bool(message.is_automatic_forward),
+        "источник": message.forward_from_name or UNKNOWN_SENDER,
+        # Скрытый пользователь свой id не отдаёт — показать нечего
+        "id источника": message.forward_from_id or "скрыт",
+        "дата оригинала": format_datetime(message.forward_origin_date) or "неизвестна",
+        "автопересылка из канала": _yes_no(message.is_automatic_forward),
     }
 
 
@@ -111,37 +128,41 @@ def _serialize_event(event):
         "тип": "служебное событие",
         "событие": _event_label(event),
         "дата": format_datetime(event.happened_at),
-        "кто": sender_name(event.actor),
-        "с кем": sender_name(event.target),
-        "подробности": event.details,
-        "закреплённое сообщение": event.target_message_id,
+        "кто": sender_name(event.actor) or UNKNOWN_SENDER,
+        "с кем": sender_name(event.target) or "никого",
+        "подробности": event.details or "нет",
+        "закреплённое сообщение": event.target_message_id or "нет",
     }
 
 
 def _serialize_message(message, by_telegram_id):
+    versions = [
+        {
+            "текст": version.text or NO_TEXT,
+            "заменено": format_datetime(version.replaced_at),
+        }
+        for version in message.versions
+    ]
+    attachments = [
+        {
+            "file_type": attachment.file_type,
+            "file_path": attachment.file_path,
+            # У фото и голосовых Telegram имени файла не присылает
+            "original_filename": attachment.original_filename or "имени нет",
+        }
+        for attachment in message.attachments
+    ]
+
     return {
         "тип": "сообщение",
-        "отправитель": sender_name(message.user),
-        "текст": message.text,
+        "отправитель": sender_name(message.user) or UNKNOWN_SENDER,
+        "текст": message.text or NO_TEXT,
         "дата отправки": format_datetime(message.sent_at),
-        "была ли отредактирована": message.edited_at is not None,
+        "была ли отредактирована": _yes_no(message.edited_at),
         "ответ на": _reply_info(message, by_telegram_id),
         "переслано из": _forward_info(message),
-        "история правок": [
-            {
-                "текст": version.text,
-                "заменено": format_datetime(version.replaced_at),
-            }
-            for version in message.versions
-        ],
-        "список вложений": [
-            {
-                "file_type": attachment.file_type,
-                "file_path": attachment.file_path,
-                "original_filename": attachment.original_filename,
-            }
-            for attachment in message.attachments
-        ],
+        "история правок": versions or "правок не было",
+        "список вложений": attachments or "вложений нет",
     }
 
 
@@ -160,13 +181,14 @@ def _timeline(messages, events, by_telegram_id):
 
 
 @router.message(Command("export", ignore_case=True))
-async def cmd_export(message: Message, state: FSMContext):
+async def cmd_export(message: Message, state: FSMContext, bot: Bot):
     if not chats_overview():
-        await state.clear()
+        # Состояние сбрасываем, но данные оставляем: в них номер меню
+        await state.set_state(None)
         await message.answer(NO_CHATS_MESSAGE)
         return
 
-    await open_chat_question(message, state, ExportStates)
+    await open_dialog(bot, message, state, ExportStates)
 
 
 @router.callback_query(
@@ -177,6 +199,25 @@ async def show_list(callback: CallbackQuery, state: FSMContext, bot: Bot):
     if not await show_chat_list(bot, callback.from_user.id, state, ExportStates):
         await callback.answer(NO_CHATS_MESSAGE, show_alert=True)
         return
+    await callback.answer()
+
+
+@router.callback_query(
+    StateFilter(ExportStates.waiting_period),
+    F.data == CHAT_QUESTION_CALLBACK,
+)
+async def back_to_chat(callback: CallbackQuery, state: FSMContext, bot: Bot):
+    """Возврат к выбору чата с шага периода и из-под отправленного файла."""
+    await show_chat_question(bot, callback.from_user.id, state, ExportStates, back=True)
+    await callback.answer()
+
+
+@router.callback_query(
+    StateFilter(ExportStates.waiting_period),
+    F.data == PERIOD_CALLBACK,
+)
+async def back_to_period(callback: CallbackQuery, state: FSMContext, bot: Bot):
+    await show_period_question(bot, callback.from_user.id, state, back=True)
     await callback.answer()
 
 
@@ -192,11 +233,11 @@ async def show_ids(callback: CallbackQuery, state: FSMContext, bot: Bot):
 
 
 @router.callback_query(
-    StateFilter(ExportStates.waiting_chat_id, ExportStates.waiting_period),
+    StateFilter(ExportStates.waiting_chat_id),
     F.data == CHAT_QUESTION_CALLBACK,
 )
 async def back_to_question(callback: CallbackQuery, state: FSMContext, bot: Bot):
-    await show_chat_question(bot, callback.from_user.id, state, ExportStates)
+    await show_chat_question(bot, callback.from_user.id, state, ExportStates, back=True)
     await callback.answer()
 
 
@@ -219,14 +260,28 @@ async def receive_chat_id(message: Message, state: FSMContext, bot: Bot):
     try:
         telegram_chat_id = int((message.text or "").strip())
     except ValueError:
-        await message.answer("Выберите чат кнопкой или отправьте его telegram_chat_id.")
+        await show_chat_list(
+            bot,
+            message.chat.id,
+            state,
+            ExportStates,
+            notice="Выберите чат кнопкой или отправьте его telegram_chat_id.",
+            answers=message.message_id,
+        )
         return
 
     if not await accept_chat(state, telegram_chat_id, ExportStates.waiting_period):
-        await message.answer("Чат с таким telegram_chat_id не найден в базе.")
+        await show_chat_list(
+            bot,
+            message.chat.id,
+            state,
+            ExportStates,
+            notice="Чат с таким telegram_chat_id не найден в базе.",
+            answers=message.message_id,
+        )
         return
 
-    await show_period_question(bot, message.chat.id, state)
+    await show_period_question(bot, message.chat.id, state, answers=message.message_id)
 
 
 @router.message(StateFilter(ExportStates.waiting_period))
@@ -234,7 +289,9 @@ async def receive_period(message: Message, state: FSMContext, bot: Bot):
     try:
         date_from, date_to, label_from, label_to = parse_period(message.text)
     except PeriodError as error:
-        await show_period_question(bot, message.chat.id, state, notice=str(error))
+        await show_period_question(
+            bot, message.chat.id, state, notice=str(error), answers=message.message_id
+        )
         return
 
     data = await state.get_data()
@@ -251,8 +308,12 @@ async def receive_period(message: Message, state: FSMContext, bot: Bot):
         db.close()
 
     if not payload:
-        await show_period_question(
-            bot, message.chat.id, state, notice="За этот период сообщений не найдено."
+        await show_empty_result(
+            bot,
+            message.chat.id,
+            state,
+            "За этот период сообщений не найдено.",
+            answers=message.message_id,
         )
         return
 
@@ -264,6 +325,7 @@ async def receive_period(message: Message, state: FSMContext, bot: Bot):
     if events:
         caption += f", служебных событий: {len(events)}"
 
-    await message.answer_document(document, caption=caption)
-    # Экран с кнопкой «Назад» больше ни к чему не ведёт, убираем вместе с командой
-    await close_screen(bot, message.chat.id, state)
+    sent = await message.answer_document(
+        document, caption=caption, reply_markup=delivered_keyboard()
+    )
+    await finish_dialog(bot, message.chat.id, state, sent.message_id)

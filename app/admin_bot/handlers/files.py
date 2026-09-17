@@ -15,18 +15,22 @@ from app.admin_bot.handlers.common import (
     CHAT_LIST_CALLBACK,
     CHAT_QUESTION_CALLBACK,
     NO_CHATS_MESSAGE,
+    PERIOD_CALLBACK,
     PeriodError,
     accept_chat,
     chats_overview,
-    close_screen,
+    delete_message,
+    delivered_keyboard,
+    finish_dialog,
     format_datetime,
     format_day,
-    open_chat_question,
+    open_dialog,
     parse_period,
     sender_name,
     show_chat_ids,
     show_chat_list,
     show_chat_question,
+    show_empty_result,
     show_period_question,
 )
 from app.db.crud import get_messages_by_period
@@ -144,13 +148,14 @@ def _problem_lines(missing, oversized):
 
 
 @router.message(Command("files", ignore_case=True))
-async def cmd_files(message: Message, state: FSMContext):
+async def cmd_files(message: Message, state: FSMContext, bot: Bot):
     if not chats_overview():
-        await state.clear()
+        # Состояние сбрасываем, но данные оставляем: в них номер меню
+        await state.set_state(None)
         await message.answer(NO_CHATS_MESSAGE)
         return
 
-    await open_chat_question(message, state, FilesStates)
+    await open_dialog(bot, message, state, FilesStates)
 
 
 @router.callback_query(
@@ -161,6 +166,25 @@ async def show_list(callback: CallbackQuery, state: FSMContext, bot: Bot):
     if not await show_chat_list(bot, callback.from_user.id, state, FilesStates):
         await callback.answer(NO_CHATS_MESSAGE, show_alert=True)
         return
+    await callback.answer()
+
+
+@router.callback_query(
+    StateFilter(FilesStates.waiting_period),
+    F.data == CHAT_QUESTION_CALLBACK,
+)
+async def back_to_chat(callback: CallbackQuery, state: FSMContext, bot: Bot):
+    """Возврат к выбору чата с шага периода и из-под отправленного архива."""
+    await show_chat_question(bot, callback.from_user.id, state, FilesStates, back=True)
+    await callback.answer()
+
+
+@router.callback_query(
+    StateFilter(FilesStates.waiting_period),
+    F.data == PERIOD_CALLBACK,
+)
+async def back_to_period(callback: CallbackQuery, state: FSMContext, bot: Bot):
+    await show_period_question(bot, callback.from_user.id, state, back=True)
     await callback.answer()
 
 
@@ -176,11 +200,11 @@ async def show_ids(callback: CallbackQuery, state: FSMContext, bot: Bot):
 
 
 @router.callback_query(
-    StateFilter(FilesStates.waiting_chat_id, FilesStates.waiting_period),
+    StateFilter(FilesStates.waiting_chat_id),
     F.data == CHAT_QUESTION_CALLBACK,
 )
 async def back_to_question(callback: CallbackQuery, state: FSMContext, bot: Bot):
-    await show_chat_question(bot, callback.from_user.id, state, FilesStates)
+    await show_chat_question(bot, callback.from_user.id, state, FilesStates, back=True)
     await callback.answer()
 
 
@@ -203,14 +227,28 @@ async def receive_chat_id(message: Message, state: FSMContext, bot: Bot):
     try:
         telegram_chat_id = int((message.text or "").strip())
     except ValueError:
-        await message.answer("Выберите чат кнопкой или отправьте его telegram_chat_id.")
+        await show_chat_list(
+            bot,
+            message.chat.id,
+            state,
+            FilesStates,
+            notice="Выберите чат кнопкой или отправьте его telegram_chat_id.",
+            answers=message.message_id,
+        )
         return
 
     if not await accept_chat(state, telegram_chat_id, FilesStates.waiting_period):
-        await message.answer("Чат с таким telegram_chat_id не найден в базе.")
+        await show_chat_list(
+            bot,
+            message.chat.id,
+            state,
+            FilesStates,
+            notice="Чат с таким telegram_chat_id не найден в базе.",
+            answers=message.message_id,
+        )
         return
 
-    await show_period_question(bot, message.chat.id, state)
+    await show_period_question(bot, message.chat.id, state, answers=message.message_id)
 
 
 @router.message(StateFilter(FilesStates.waiting_period))
@@ -218,7 +256,9 @@ async def receive_period(message: Message, state: FSMContext, bot: Bot):
     try:
         date_from, date_to, label_from, label_to = parse_period(message.text)
     except PeriodError as error:
-        await show_period_question(bot, message.chat.id, state, notice=str(error))
+        await show_period_question(
+            bot, message.chat.id, state, notice=str(error), answers=message.message_id
+        )
         return
 
     data = await state.get_data()
@@ -240,15 +280,21 @@ async def receive_period(message: Message, state: FSMContext, bot: Bot):
             notice = "За этот период сообщений не найдено."
         else:
             notice = "За этот период вложений нет."
-        await show_period_question(bot, message.chat.id, state, notice=notice)
+        await show_empty_result(
+            bot, message.chat.id, state, notice, answers=message.message_id
+        )
         return
 
-    await message.answer(f"Собираю архив, вложений: {len(found)}")
+    progress = await message.answer(f"Собираю архив, вложений: {len(found)}")
 
     # Упаковка десятков мегабайт блокирует event loop, поэтому уводим её в поток
     archives = await asyncio.to_thread(_build_archives, found)
 
+    # Своё же уведомление о сборке после архива читать незачем
+    await delete_message(bot, message.chat.id, progress.message_id)
+
     total = len(archives)
+    delivered = None
     for number, content in enumerate(archives, start=1):
         suffix = "" if total == 1 else f"_часть{number}"
         filename = (
@@ -258,13 +304,19 @@ async def receive_period(message: Message, state: FSMContext, bot: Bot):
             caption = f"Вложений в архиве: {len(found)}"
         else:
             caption = f"Часть {number} из {total}"
-        await message.answer_document(
+        # Кнопки нужны под самым последним сообщением, иначе окажутся выше текста
+        last = number == total and not problems
+        sent = await message.answer_document(
             BufferedInputFile(content, filename=filename),
             caption=caption,
+            reply_markup=delivered_keyboard() if last else None,
         )
+        delivered = sent.message_id
 
     if problems:
-        await message.answer("\n".join(problems))
+        sent = await message.answer(
+            "\n".join(problems), reply_markup=delivered_keyboard()
+        )
+        delivered = sent.message_id
 
-    # Экран с кнопкой «Назад» больше ни к чему не ведёт, убираем вместе с командой
-    await close_screen(bot, message.chat.id, state)
+    await finish_dialog(bot, message.chat.id, state, delivered)
