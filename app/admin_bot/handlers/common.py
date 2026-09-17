@@ -31,6 +31,7 @@ CHAT_QUESTION_CALLBACK = "nav:chat"
 CHAT_LIST_CALLBACK = "nav:list"
 CHAT_IDS_CALLBACK = "nav:ids"
 PERIOD_CALLBACK = "nav:period"
+KEYWORD_CALLBACK = "nav:keyword"
 
 # Шаги открытого диалога и команды, которые его вызвали, — из чего складывается
 # экран и что бот вправе убрать, если диалог закрывается, не оставив следа
@@ -43,7 +44,8 @@ MAX_CHAT_BUTTONS = 20
 START_MESSAGE = (
     "Привет! Это бот для выгрузки корпоративных переписок.\n"
     "/export — JSON с сообщениями выбранного чата за период.\n"
-    "/files — архив с вложениями этих сообщений."
+    "/files — архив с вложениями этих сообщений.\n"
+    "/search — поиск по слову: кто и когда о нём писал."
 )
 
 CHAT_QUESTION = "Из какого чата взять данные?"
