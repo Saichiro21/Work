@@ -22,6 +22,9 @@ from app.admin_bot.handlers.common import (
     parse_period,
     show_chat_ids,
     show_chat_list,
+    reject_bad_chat_id,
+    reject_period,
+    reject_unknown_chat,
     show_chat_question,
     show_empty_result,
     show_period_question,
@@ -118,24 +121,14 @@ async def receive_chat_id(message: Message, state: FSMContext, bot: Bot):
     try:
         telegram_chat_id = int((message.text or "").strip())
     except ValueError:
-        await show_chat_list(
-            bot,
-            message.chat.id,
-            state,
-            ExportStates,
-            notice="Выберите чат кнопкой или отправьте его telegram_chat_id.",
-            answers=message.message_id,
+        await reject_bad_chat_id(
+            bot, message.chat.id, state, ExportStates, message.message_id
         )
         return
 
     if not await accept_chat(state, telegram_chat_id, ExportStates.waiting_period):
-        await show_chat_list(
-            bot,
-            message.chat.id,
-            state,
-            ExportStates,
-            notice="Чат с таким telegram_chat_id не найден в базе.",
-            answers=message.message_id,
+        await reject_unknown_chat(
+            bot, message.chat.id, state, ExportStates, message.message_id
         )
         return
 
@@ -145,11 +138,9 @@ async def receive_chat_id(message: Message, state: FSMContext, bot: Bot):
 @router.message(StateFilter(ExportStates.waiting_period))
 async def receive_period(message: Message, state: FSMContext, bot: Bot):
     try:
-        date_from, date_to, label_from, label_to = parse_period(message.text)
+        date_from, date_to, file_label, _ = parse_period(message.text)
     except PeriodError as error:
-        await show_period_question(
-            bot, message.chat.id, state, notice=str(error), answers=message.message_id
-        )
+        await reject_period(bot, message.chat.id, state, str(error), message.message_id)
         return
 
     data = await state.get_data()
@@ -175,7 +166,7 @@ async def receive_period(message: Message, state: FSMContext, bot: Bot):
         return
 
     content = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
-    filename = f"export_{telegram_chat_id}_{label_from}_{label_to}.json"
+    filename = f"export_{telegram_chat_id}_{file_label}.json"
     document = BufferedInputFile(content, filename=filename)
 
     caption = f"Найдено сообщений: {len(messages)}"

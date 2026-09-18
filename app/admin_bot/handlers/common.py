@@ -8,7 +8,7 @@ from functools import lru_cache
 from html import escape
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app.db.crud import get_chats_overview
@@ -18,7 +18,8 @@ from app.db.models import Chat
 logger = logging.getLogger(__name__)
 
 DATE_PART = r"(\d{2}\.\d{2}\.\d{4})"
-PERIOD_PATTERN = re.compile(rf"^{DATE_PART}\s*-\s*{DATE_PART}$")
+# Вторая дата необязательна: одна дата означает период из этого одного дня
+PERIOD_PATTERN = re.compile(rf"^{DATE_PART}(?:\s*-\s*{DATE_PART})?$")
 DATE_INPUT_FORMAT = "%d.%m.%Y"
 
 DEFAULT_TIMEZONE = "Europe/Moscow"
@@ -38,23 +39,41 @@ KEYWORD_CALLBACK = "nav:keyword"
 STEPS_KEY = "steps"
 COMMANDS_KEY = "commands"
 
+# Чат выбирают на одном из трёх экранов. Какой открыт — нужно знать, чтобы
+# ошибка ввода показалась там же, а не перебрасывала человека на другой
+CHAT_SCREEN_KEY = "chat_screen"
+QUESTION_SCREEN = "question"
+LIST_SCREEN = "list"
+IDS_SCREEN = "ids"
+
+# Просит ли открытый экран прислать номер чата. Где не просит — там присланный
+# текст мусор: его убираем молча, вместо того чтобы отвечать на него экраном
+CHAT_ASKS_ID_KEY = "chat_asks_id"
+
 # Кнопок в одном сообщении Telegram держит немного, остальные чаты выбираются вводом ID
 MAX_CHAT_BUTTONS = 20
 
-START_MESSAGE = (
-    "Привет! Это бот для выгрузки корпоративных переписок.\n"
+# Список команд существует в одном экземпляре: его печатают и приветствие,
+# и ответ на неизвестную команду, а две копии однажды уже разъехались
+COMMANDS_LIST = (
     "/export — JSON с сообщениями выбранного чата за период.\n"
     "/files — архив с вложениями этих сообщений.\n"
     "/search — поиск по слову: кто и когда о нём писал."
 )
 
+START_MESSAGE = (
+    "Я бот для выгрузки корпоративных переписок.\n\n"
+    "Вы можете управлять мной, отправляя следующие команды:\n\n" + COMMANDS_LIST
+)
+
+UNKNOWN_COMMAND = "Такой команды нет. Доступные команды:\n\n" + COMMANDS_LIST
+
 CHAT_QUESTION = "Из какого чата взять данные?"
 
-CHAT_LIST_HEADER = "Выберите чат из списка и укажите его telegram_chat_id."
+CHAT_LIST_HEADER = "Выберите чат из списка:"
 
 CHAT_IDS_HEADER = (
-    "telegram_chat_id собранных чатов. Нажмите на номер, чтобы скопировать его — "
-    "он нужен для COLLECTOR_CHAT_IDS в .env."
+    "telegram_chat_id собранных чатов. Нажмите на номер, чтобы скопировать его."
 )
 
 NO_CHATS_MESSAGE = (
@@ -62,7 +81,16 @@ NO_CHATS_MESSAGE = (
     "и напишите там сообщение — чат появится в списке."
 )
 
-PERIOD_PROMPT = "За какой период? Введите даты в формате ДД.ММ.ГГГГ - ДД.ММ.ГГГГ"
+BAD_CHAT_ID = (
+    "Это не похоже на telegram_chat_id. Выберите его из списка ниже."
+)
+
+UNKNOWN_CHAT_ID = "Чата с таким telegram_chat_id в базе нет."
+
+PERIOD_PROMPT = (
+    "За какой период? Введите дату ДД.ММ.ГГГГ "
+    "или диапазон ДД.ММ.ГГГГ - ДД.ММ.ГГГГ"
+)
 
 
 class PeriodError(ValueError):
@@ -109,6 +137,43 @@ def format_date(value):
     return moment.strftime("%d.%m.%Y")
 
 
+def format_size(size_bytes):
+    """Размер файла словами. Старые вложения писались без размера."""
+    if size_bytes is None:
+        return "неизвестен"
+    if size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.0f} КБ"
+    return f"{size_bytes / (1024 * 1024):.1f} МБ"
+
+
+def format_duration(seconds):
+    """Длительность как в плеере: 0:42, а для долгих записей 1:05:03."""
+    if seconds is None:
+        return None
+    hours, rest = divmod(int(seconds), 3600)
+    minutes, secs = divmod(rest, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes}:{secs:02d}"
+
+
+# В БД типы лежат так, как их называет Bot API, — выгрузку читают люди
+FILE_TYPE_LABELS = {
+    "photo": "фото",
+    "animation": "GIF-анимация",
+    "video": "видео",
+    "video_note": "видеосообщение, кружок",
+    "voice": "голосовое сообщение",
+    "audio": "аудиофайл",
+    "document": "документ",
+}
+
+
+def file_type_label(file_type):
+    """Незнакомый тип отдаём как есть: соврать хуже, чем показать английское слово."""
+    return FILE_TYPE_LABELS.get(file_type, file_type)
+
+
 def chats_overview():
     db = SessionLocal()
     try:
@@ -127,13 +192,21 @@ def chat_question_keyboard():
     return builder.as_markup()
 
 
-def chat_list_view():
-    """Второй экран: (текст со списком, клавиатура) или (None, None), если чатов нет."""
+def chat_list_view(header=CHAT_LIST_HEADER):
+    """Второй экран: (текст, клавиатура, ждём ли номер текстом).
+
+    Если чатов нет, показывать нечего — (None, None, False). Номер просим только
+    когда кнопок хватило не на все чаты: иначе чат выбирают кнопкой, и присланный
+    на этом экране текст — просто мусор.
+
+    В header передают замечание, если прошлый ввод не подошёл: оно встаёт на
+    место обычной строки-приглашения, а не поверх неё.
+    """
     chats = chats_overview()
     if not chats:
-        return None, None
+        return None, None, False
 
-    lines = [CHAT_LIST_HEADER]
+    lines = [header]
     builder = InlineKeyboardBuilder()
     # Выход идёт сверху, чтобы список чатов ниже читался одним блоком
     builder.button(text="Назад", callback_data=CHAT_QUESTION_CALLBACK)
@@ -149,16 +222,20 @@ def chat_list_view():
     if hidden > 0:
         lines.append(f"\nЕщё чатов: {hidden}. Для них отправьте telegram_chat_id.")
 
-    return "\n".join(lines), builder.as_markup()
+    return "\n".join(lines), builder.as_markup(), hidden > 0
 
 
-def chat_ids_view():
-    """Экран со списком telegram_chat_id. Номера в теге code — их удобно копировать."""
+def chat_ids_view(header=CHAT_IDS_HEADER):
+    """Экран со списком telegram_chat_id. Номера в теге code — их удобно копировать.
+
+    В header передают замечание, если прошлый ввод не подошёл: объяснять, зачем
+    экран открыт, уже незачем — человек его видит, а вот что делать теперь, нет.
+    """
     chats = chats_overview()
     if not chats:
         return None, None
 
-    lines = [CHAT_IDS_HEADER, ""]
+    lines = [header, ""]
     for telegram_chat_id, title, messages, last_sent_at in chats:
         name = escape(title or f"чат {telegram_chat_id}")
         activity = f"{messages} сообщений" if messages else "пока пусто"
@@ -202,12 +279,18 @@ def delivered_keyboard():
 
 
 async def delete_message(bot, chat_id, message_id):
+    """Уборка в переписке: не вышло — и ладно, диалог от этого не зависит.
+
+    Ловим любую ошибку Telegram, а не только «сообщения нет»: при быстром вводе
+    подряд удаления могут упереться в ограничение частоты запросов, и лишний
+    мусор в переписке лучше упавшего обработчика.
+    """
     if message_id is None:
         return
     try:
         await bot.delete_message(chat_id, message_id)
-    except TelegramBadRequest:
-        logger.info("Сообщение %s удалить не удалось", message_id)
+    except TelegramAPIError as error:
+        logger.info("Сообщение %s удалить не удалось: %s", message_id, error)
 
 
 async def _drop_buttons(bot, chat_id, message_id):
@@ -227,13 +310,13 @@ async def _drop_buttons(bot, chat_id, message_id):
 
 
 def _steps(data):
-    """Шаги диалога снизу вверх: пары «экран бота, ввод пользователя над ним».
+    """Шаги диалога снизу вверх: «экран бота и то, что человек ввёл над ним».
 
-    Ввод есть только у тех шагов, что открылись ответом на присланный текст.
-    По этим парам диалог умеет откатываться: убрать экран вместе с вводом и
-    оживить тот, что был выше.
+    У шагов, открытых кнопкой, ввода нет — там None. По этим парам диалог
+    откатывается: убрать экран вместе с вводом, на который он отвечает,
+    и оживить тот, что был выше.
     """
-    return [list(step) for step in data.get(STEPS_KEY, [])]
+    return [[step[0], step[1]] for step in data.get(STEPS_KEY, [])]
 
 
 def _menu_in_sight(data):
@@ -246,7 +329,7 @@ def _menu_in_sight(data):
     return (
         data.get("menu_message_id") is not None
         and data.get("file_message_id") is None
-        and all(step[1] is None for step in _steps(data))
+        and all(input_message_id is None for _, input_message_id in _steps(data))
     )
 
 
@@ -288,16 +371,23 @@ async def open_dialog(bot, message, state, states):
 
 
 async def show_screen(
-    bot, chat_id, state, text, keyboard=None, parse_mode=None, answers=None, back=False
+    bot,
+    chat_id,
+    state,
+    text,
+    keyboard=None,
+    parse_mode=None,
+    answers=None,
+    back=False,
 ):
     """Показывает шаг диалога.
 
     Переход по кнопке правит текущий экран на месте: диалог живёт в одном
     сообщении и переписка от него не растёт. Если это ответ на присланный текст
     (answers), экран должен встать под ним, а не поверх — тогда у прошлого шага
-    снимаем кнопки и присылаем новый вниз, ничего не удаляя. Шаг назад (back)
-    возвращает диалог туда, откуда он ушёл: экран и вызвавший его ввод убираются,
-    а прошлый экран оживает.
+    снимаем кнопки и присылаем новый вниз. Шаг назад (back) возвращает диалог
+    туда, откуда он ушёл: экран и все вводы под ним убираются, а прошлый экран
+    оживает.
     """
     data = await state.get_data()
     steps = _steps(data)
@@ -312,7 +402,8 @@ async def show_screen(
             chat_id, text, reply_markup=keyboard, parse_mode=parse_mode
         )
         await state.update_data(
-            steps=steps + [[screen.message_id, answers]], file_message_id=None
+            steps=steps + [[screen.message_id, answers]],
+            file_message_id=None,
         )
         return
 
@@ -332,7 +423,12 @@ async def show_screen(
             )
             await state.update_data(steps=steps)
             return
-        except TelegramBadRequest:
+        except TelegramBadRequest as error:
+            # Экран уже такой: второй раз то же замечание, менять нечего. Telegram
+            # считает это ошибкой, но присылать копию экрана тут точно не нужно
+            if "not modified" in str(error):
+                await state.update_data(steps=steps)
+                return
             logger.info("Экран %s изменить не удалось, присылаем новый", steps[-1][0])
             steps.pop()
 
@@ -345,10 +441,21 @@ async def show_screen(
     )
 
 
-async def show_chat_question(bot, chat_id, state, states, back=False):
+async def show_chat_question(
+    bot, chat_id, state, states, notice=None, answers=None, back=False
+):
+    text = CHAT_QUESTION if notice is None else f"{notice}\n\n{CHAT_QUESTION}"
     await state.set_state(states.waiting_chat_id)
+    # Здесь только кнопки: номер чата человек может прислать, но его не просят
+    await state.update_data(chat_screen=QUESTION_SCREEN, chat_asks_id=False)
     await show_screen(
-        bot, chat_id, state, CHAT_QUESTION, chat_question_keyboard(), back=back
+        bot,
+        chat_id,
+        state,
+        text,
+        chat_question_keyboard(),
+        answers=answers,
+        back=back,
     )
 
 
@@ -356,36 +463,119 @@ async def show_chat_list(bot, chat_id, state, states, notice=None, answers=None)
     """Возвращает False, если список пуст и показывать нечего.
 
     answers — id присланного сообщения, если список открывается ответом на него.
+    notice — замечание о прошлом вводе; оно заменяет строку-приглашение, потому
+    что говорит то же самое и вместо неё.
     """
-    text, keyboard = chat_list_view()
+    text, keyboard, asks_id = chat_list_view(notice or CHAT_LIST_HEADER)
     if text is None:
         return False
 
-    if notice:
-        text = f"{notice}\n\n{text}"
-
     await state.set_state(states.waiting_chat_id)
+    await state.update_data(chat_screen=LIST_SCREEN, chat_asks_id=asks_id)
     await show_screen(bot, chat_id, state, text, keyboard, answers=answers)
     return True
 
 
-async def show_chat_ids(bot, chat_id, state, states):
-    """Возвращает False, если чатов в базе нет."""
-    text, keyboard = chat_ids_view()
+async def show_chat_ids(bot, chat_id, state, states, notice=None, answers=None):
+    """Возвращает False, если чатов в базе нет.
+
+    notice — замечание о прошлом вводе; оно заменяет заголовок экрана, иначе
+    к списку номеров прибавляется ещё абзац, а он и без того длинный.
+    """
+    text, keyboard = chat_ids_view(notice or CHAT_IDS_HEADER)
     if text is None:
         return False
 
     await state.set_state(states.waiting_chat_id)
-    await show_screen(bot, chat_id, state, text, keyboard, parse_mode="HTML")
+    # Экран для того и открыт, чтобы скопировать номер и прислать его
+    await state.update_data(chat_screen=IDS_SCREEN, chat_asks_id=True)
+    await show_screen(
+        bot,
+        chat_id,
+        state,
+        text,
+        keyboard,
+        parse_mode="HTML",
+        answers=answers,
+    )
     return True
 
 
+async def _reject_chat_input(bot, chat_id, state, states, notice, answers):
+    """Присланное на выбор чата не подошло.
+
+    Убираем сам ввод и правим открытый экран на месте, дописывая к нему замечание.
+    Экраны выбора чата длинные: если отвечать на неудачный ввод новым экраном, в
+    переписке остаётся вторая копия всего списка, и с каждой попыткой ещё одна.
+    Так же поступаем и с экраном-вопросом — ради одного правила на все три.
+
+    Человек при этом ничего не теряет: править отправленное всё равно нельзя,
+    а номер, который не разобрали или не нашли, перенабирают, а не исправляют.
+    """
+    await delete_message(bot, chat_id, answers)
+
+    data = await state.get_data()
+    screen = data.get(CHAT_SCREEN_KEY, QUESTION_SCREEN)
+    shown = False
+
+    if screen == LIST_SCREEN:
+        shown = await show_chat_list(bot, chat_id, state, states, notice=notice)
+    elif screen == IDS_SCREEN:
+        shown = await show_chat_ids(bot, chat_id, state, states, notice=notice)
+
+    # Чаты могли исчезнуть из базы, пока человек печатал, — тогда показывать
+    # список нечем, и остаётся первый экран выбора
+    if not shown:
+        await show_chat_question(bot, chat_id, state, states, notice=notice)
+
+
+async def reject_bad_chat_id(bot, chat_id, state, states, answers):
+    """Присланное не разобрать как номер чата.
+
+    Где чат выбирают кнопкой, номер никто не просил: случайный текст под таким
+    экраном — мусор. Его убираем молча, сказать о таком вводе всё равно нечего.
+    Если же номер на экране как раз ждут — на списке номеров или когда кнопок
+    хватило не на все чаты, — подсказываем формат.
+    """
+    data = await state.get_data()
+    if not data.get(CHAT_ASKS_ID_KEY):
+        await delete_message(bot, chat_id, answers)
+        return
+
+    await _reject_chat_input(bot, chat_id, state, states, BAD_CHAT_ID, answers)
+
+
+async def reject_unknown_chat(bot, chat_id, state, states, answers):
+    """Номер разобран, но такого чата в базе нет — это не зависит от экрана."""
+    await _reject_chat_input(bot, chat_id, state, states, UNKNOWN_CHAT_ID, answers)
+
+
 async def show_period_question(bot, chat_id, state, notice=None, answers=None, back=False):
-    """Шаг с периодом. В notice передают, чем закончилась прошлая попытка."""
-    text = PERIOD_PROMPT if notice is None else f"{notice}\n\n{PERIOD_PROMPT}"
+    """Шаг с периодом. В notice передают, чем закончилась прошлая попытка.
+
+    Замечание идёт вместо вопроса, а не над ним: формат от этого не теряется.
+    Либо он в самом замечании примером, либо присланное уже было правильного
+    вида — тогда человек формат знает, и дело не в нём.
+    """
     await show_screen(
-        bot, chat_id, state, text, period_keyboard(), answers=answers, back=back
+        bot,
+        chat_id,
+        state,
+        notice or PERIOD_PROMPT,
+        period_keyboard(),
+        answers=answers,
+        back=back,
     )
+
+
+async def reject_period(bot, chat_id, state, notice, answers):
+    """Присланный период не подошёл.
+
+    В отличие от выбора чата, здесь ничего не убирается: и присланные даты, и
+    прежние замечания остаются в переписке. Даты человек набирает сам, и видеть
+    все свои попытки рядом с ответами бота полезнее, чем чистое окно.
+    """
+    await show_period_question(bot, chat_id, state, notice=notice, answers=answers)
 
 
 async def show_empty_result(bot, chat_id, state, text, answers):
@@ -395,11 +585,22 @@ async def show_empty_result(bot, chat_id, state, text, answers):
     )
 
 
-async def open_menu(bot, message, state):
+async def forget_menu(state):
+    """Прежнее меню больше не переиспользовать: под ним появился чужой текст.
+
+    Пока ниже меню только команды и экраны диалога, бот вправе всё это убрать и
+    оставить одно живое окно. Сообщение, которого он не присылал, так не уберёшь,
+    поэтому такое меню становится историей и остаётся в переписке.
+    """
+    await state.update_data(menu_message_id=None)
+
+
+async def open_menu(bot, message, state, text=START_MESSAGE):
     """Меню по команде /start: она уже внизу переписки, поэтому меню присылаем новым.
 
     Прежнее меню и следы диалога убираем, если они ещё были последними, — иначе
-    список команд задвоится.
+    список команд задвоится. В text передают, чем меню открывается: приветствием
+    или объяснением, почему присланное не подошло, — команды в нём те же.
     """
     data = await state.get_data()
     chat_id = message.chat.id
@@ -411,7 +612,7 @@ async def open_menu(bot, message, state):
             await delete_message(bot, chat_id, command_message_id)
     await _drop_buttons(bot, chat_id, data.get("file_message_id"))
 
-    menu = await message.answer(START_MESSAGE)
+    menu = await message.answer(text)
     await state.update_data(menu_message_id=menu.message_id, commands=[])
 
 
@@ -505,18 +706,43 @@ def _parse_date(text):
         raise PeriodError("Некорректная дата. Проверьте числа в диапазоне.")
 
 
+def _file_label(day_from, day_to):
+    """Период в имени файла. За один день — одна дата, а не она же дважды."""
+    if day_from == day_to:
+        return day_from.strftime(FILENAME_DATE_FORMAT)
+    return (
+        f"{day_from.strftime(FILENAME_DATE_FORMAT)}_"
+        f"{day_to.strftime(FILENAME_DATE_FORMAT)}"
+    )
+
+
+def _text_label(day_from, day_to):
+    """Период в тексте сообщений: «17.09.2026» или «01.09.2026 — 17.09.2026»."""
+    if day_from == day_to:
+        return day_from.strftime(DATE_INPUT_FORMAT)
+    return (
+        f"{day_from.strftime(DATE_INPUT_FORMAT)} — "
+        f"{day_to.strftime(DATE_INPUT_FORMAT)}"
+    )
+
+
 def parse_period(text):
-    """Возвращает (граница «с» в UTC, граница «по» в UTC, подпись «с», подпись «по»).
+    """Возвращает (граница «с» в UTC, граница «по» в UTC, подпись в имя файла, подпись в текст).
 
     Даты пользователь называет по своему времени, а в базе всё в UTC, поэтому
     границы суток переводим в UTC — иначе край периода съедет на размер смещения.
     """
     match = PERIOD_PATTERN.match((text or "").strip())
     if not match:
-        raise PeriodError("Неверный формат. Введите даты так: ДД.ММ.ГГГГ - ДД.ММ.ГГГГ")
+        # Формат не повторяем: он в вопросе выше. Примеры полезнее — по ним видно
+        # и разделитель, и то, что год пишется полностью, и что дата бывает одна
+        raise PeriodError(
+            "Неверный формат. Например: 17.09.2026 или 01.09.2026 - 17.09.2026"
+        )
 
     day_from = _parse_date(match.group(1))
-    day_to = _parse_date(match.group(2))
+    # Одна дата — это период из одного дня: спрашивают обычно «что было вчера»
+    day_to = _parse_date(match.group(2)) if match.group(2) else day_from
 
     if day_from > day_to:
         raise PeriodError("Дата начала не может быть позже даты окончания.")
@@ -545,8 +771,8 @@ def parse_period(text):
     return (
         local_from.astimezone(timezone.utc).replace(tzinfo=None),
         local_to.astimezone(timezone.utc).replace(tzinfo=None),
-        day_from.strftime(FILENAME_DATE_FORMAT),
-        day_to.strftime(FILENAME_DATE_FORMAT),
+        _file_label(day_from, day_to),
+        _text_label(day_from, day_to),
     )
 
 

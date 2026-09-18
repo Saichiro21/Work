@@ -28,11 +28,24 @@ def test_последний_день_входит_целиком():
     assert date_to.second == 59
 
 
-def test_подписи_для_имени_файла():
-    *_, label_from, label_to = parse_period("01.09.2026 - 14.09.2026")
+def test_подписи_периода():
+    *_, file_label, text_label = parse_period("01.09.2026 - 14.09.2026")
 
-    assert label_from == "01-09-2026"
-    assert label_to == "14-09-2026"
+    assert file_label == "01-09-2026_14-09-2026"
+    assert text_label == "01.09.2026 — 14.09.2026"
+
+
+def test_одна_дата_это_период_из_одного_дня():
+    date_from, date_to, file_label, text_label = parse_period("14.09.2026")
+
+    assert (date_from, date_to) == parse_period("14.09.2026 - 14.09.2026")[:2]
+    # Одну дату в подписях не задваиваем
+    assert file_label == "14-09-2026"
+    assert text_label == "14.09.2026"
+
+
+def test_пробелы_вокруг_одной_даты_необязательны():
+    assert parse_period("  14.09.2026  ") == parse_period("14.09.2026")
 
 
 def test_пробелы_вокруг_дефиса_необязательны():
@@ -43,11 +56,22 @@ def test_пробелы_вокруг_дефиса_необязательны():
 
 @pytest.mark.parametrize(
     "text",
-    ["2026-09-01 - 2026-09-02", "01.09.26 - 02.09.26", "вчера", "", "01.09.2026"],
+    [
+        "2026-09-01 - 2026-09-02",
+        "01.09.26 - 02.09.26",
+        "вчера",
+        "",
+        "01.09.2026 -",
+        "01.09.2026 - 02.09.2026 - 03.09.2026",
+    ],
 )
 def test_неверный_формат(text):
-    with pytest.raises(PeriodError, match="Неверный формат"):
+    with pytest.raises(PeriodError, match="Неверный формат") as error:
         parse_period(text)
+
+    # Замечание встаёт на место вопроса, так что формат показать больше негде
+    assert "17.09.2026" in str(error.value)
+    assert "01.09.2026 - 17.09.2026" in str(error.value)
 
 
 def test_несуществующая_дата():
@@ -60,11 +84,13 @@ def test_начало_позже_конца():
         parse_period("02.09.2026 - 01.09.2026")
 
 
-def test_один_будущий_день():
+@pytest.mark.parametrize("as_range", [False, True])
+def test_один_будущий_день(as_range):
     tomorrow = (local_today() + timedelta(days=1)).strftime("%d.%m.%Y")
+    text = f"{tomorrow} - {tomorrow}" if as_range else tomorrow
 
     with pytest.raises(PeriodError, match="ещё не наступила"):
-        parse_period(f"{tomorrow} - {tomorrow}")
+        parse_period(text)
 
 
 def test_период_целиком_в_будущем():
