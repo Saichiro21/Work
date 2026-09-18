@@ -35,6 +35,9 @@ from app.admin_bot.handlers.common import (
     sender_name,
     show_chat_ids,
     show_chat_list,
+    reject_bad_chat_id,
+    reject_period,
+    reject_unknown_chat,
     show_chat_question,
     show_period_question,
     show_screen,
@@ -293,24 +296,14 @@ async def receive_chat_id(message: Message, state: FSMContext, bot: Bot):
     try:
         telegram_chat_id = int((message.text or "").strip())
     except ValueError:
-        await show_chat_list(
-            bot,
-            message.chat.id,
-            state,
-            SearchStates,
-            notice="Выберите чат кнопкой или отправьте его telegram_chat_id.",
-            answers=message.message_id,
+        await reject_bad_chat_id(
+            bot, message.chat.id, state, SearchStates, message.message_id
         )
         return
 
     if not await accept_chat(state, telegram_chat_id, SearchStates.waiting_keyword):
-        await show_chat_list(
-            bot,
-            message.chat.id,
-            state,
-            SearchStates,
-            notice="Чат с таким telegram_chat_id не найден в базе.",
-            answers=message.message_id,
+        await reject_unknown_chat(
+            bot, message.chat.id, state, SearchStates, message.message_id
         )
         return
 
@@ -368,18 +361,15 @@ async def drop_period(callback: CallbackQuery, state: FSMContext, bot: Bot):
 @router.message(StateFilter(SearchStates.waiting_period))
 async def receive_period(message: Message, state: FSMContext, bot: Bot):
     try:
-        date_from, date_to, label_from, label_to = parse_period(message.text)
+        date_from, date_to, _, text_label = parse_period(message.text)
     except PeriodError as error:
-        await show_period_question(
-            bot, message.chat.id, state, notice=str(error), answers=message.message_id
-        )
+        await reject_period(bot, message.chat.id, state, str(error), message.message_id)
         return
 
-    # Подписи из parse_period сделаны для имени файла, в тексте нужны через точку
     await state.update_data(
         date_from=date_from,
         date_to=date_to,
-        period_label=f"{label_from.replace('-', '.')} - {label_to.replace('-', '.')}",
+        period_label=text_label,
     )
     await _show_results(bot, message.chat.id, state, answers=message.message_id)
 
