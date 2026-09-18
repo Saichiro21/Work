@@ -4,7 +4,13 @@
 пустые места подписаны словами: null и true/false читателю ни о чём не говорят.
 """
 
-from app.admin_bot.handlers.common import format_datetime, sender_name
+from app.admin_bot.handlers.common import (
+    file_type_label,
+    format_datetime,
+    format_duration,
+    format_size,
+    sender_name,
+)
 from app.db.models import ChatEventType, ForwardOriginType
 
 # Текст родительского сообщения в ответе даём отрывком: целиком он и так есть в выгрузке
@@ -15,6 +21,9 @@ NO_TEXT = "— без текста —"
 UNKNOWN_SENDER = "не определён"
 NOT_A_REPLY = "не ответ на сообщение"
 NOT_FORWARDED = "не пересылалось"
+# Пустой путь значит, что файл скачать не удалось. Молчать об этом нельзя:
+# читатель решил бы, что вложения не было вовсе. Причина — в логах коллектора.
+FILE_NOT_SAVED = "файл не сохранён, в архив вложений не попадёт"
 
 FORWARD_ORIGIN_LABELS = {
     ForwardOriginType.USER: "пользователь",
@@ -101,6 +110,23 @@ def serialize_event(event):
     }
 
 
+def _serialize_attachment(attachment):
+    """Длительность добавляем только там, где она бывает: у фото её нет вовсе."""
+    payload = {
+        "тип": file_type_label(attachment.file_type),
+        "файл": attachment.file_path or FILE_NOT_SAVED,
+        # У фото, голосовых и кружков Telegram имени файла не присылает
+        "имя файла": attachment.original_filename or "имени нет",
+        "размер": format_size(attachment.file_size),
+    }
+
+    duration = format_duration(attachment.duration_seconds)
+    if duration is not None:
+        payload["длительность"] = duration
+
+    return payload
+
+
 def serialize_message(message, by_telegram_id):
     versions = [
         {
@@ -109,15 +135,7 @@ def serialize_message(message, by_telegram_id):
         }
         for version in message.versions
     ]
-    attachments = [
-        {
-            "file_type": attachment.file_type,
-            "file_path": attachment.file_path,
-            # У фото и голосовых Telegram имени файла не присылает
-            "original_filename": attachment.original_filename or "имени нет",
-        }
-        for attachment in message.attachments
-    ]
+    attachments = [_serialize_attachment(item) for item in message.attachments]
 
     return {
         "тип": "сообщение",

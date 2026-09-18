@@ -154,7 +154,83 @@ def test_вложение_без_имени():
 
     result = serialize_message(with_photo, {})
 
-    assert result["список вложений"][0]["original_filename"] == "имени нет"
+    assert result["список вложений"][0]["имя файла"] == "имени нет"
+
+
+def test_не_скачанный_файл_виден_в_выгрузке():
+    """Без такой записи выгрузка утверждала бы, что вложения не было вовсе."""
+    heavy = message(
+        attachments=[
+            Attachment(
+                file_type="video",
+                file_path=None,
+                original_filename="совещание.mp4",
+                file_size=45 * 1024 * 1024,
+            )
+        ]
+    )
+
+    result = serialize_message(heavy, {})
+    attachment = result["список вложений"][0]
+
+    assert result["список вложений"] != "вложений нет"
+    assert attachment["имя файла"] == "совещание.mp4"
+    assert attachment["размер"] == "45.0 МБ"
+    assert "не сохранён" in attachment["файл"]
+
+
+def test_голосовое_описано_по_русски_и_с_длительностью():
+    voice = message(
+        text=None,
+        attachments=[
+            Attachment(
+                file_type="voice",
+                file_path="2026-09-01/42_voice.oga",
+                file_size=118 * 1024,
+                duration_seconds=42,
+            )
+        ],
+    )
+
+    result = serialize_message(voice, {})
+    attachment = result["список вложений"][0]
+
+    assert attachment["тип"] == "голосовое сообщение"
+    assert attachment["длительность"] == "0:42"
+
+
+def test_кружок_и_долгая_запись():
+    long_note = message(
+        attachments=[
+            Attachment(file_type="video_note", file_path="x", duration_seconds=3903)
+        ]
+    )
+
+    attachment = serialize_message(long_note, {})["список вложений"][0]
+
+    assert attachment["тип"] == "видеосообщение, кружок"
+    assert attachment["длительность"] == "1:05:03"
+
+
+def test_у_фото_длительности_нет():
+    """Пустая строка «длительность: —» в выгрузке была бы мусором."""
+    photo = message(attachments=[Attachment(file_type="photo", file_path="x")])
+
+    attachment = serialize_message(photo, {})["список вложений"][0]
+
+    assert "длительность" not in attachment
+    assert attachment["тип"] == "фото"
+
+
+def test_размер_старого_вложения_неизвестен():
+    """Вложения, записанные до появления колонки file_size, читаются без ошибки."""
+    old = message(
+        attachments=[Attachment(file_type="photo", file_path="2026-09-01/photo.jpg")]
+    )
+
+    result = serialize_message(old, {})
+
+    assert result["список вложений"][0]["размер"] == "неизвестен"
 
 
 def test_события_и_сообщения_идут_одной_хронологией():
