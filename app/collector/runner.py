@@ -7,6 +7,11 @@ from app.db.db import init_tables
 
 logger = logging.getLogger(__name__)
 
+# Вложение скачивается внутри обработчика, поэтому залп файлов в чате
+# превращается в залп одновременных загрузок. Telegram отвечает на такое 429,
+# а вложение, которое не удалось скачать, второй попытки не получает.
+CONCURRENT_UPDATES_LIMIT = 4
+
 
 async def run_collector():
     init_tables()
@@ -22,7 +27,11 @@ async def run_collector():
         me = await bot.get_me()
         logger.info("Collector запущен как @%s (id=%s)", me.username, me.id)
         # Остановкой управляет app/main.py, свои обработчики сигналов aiogram не нужны
-        await dp.start_polling(bot, handle_signals=False)
+        await dp.start_polling(
+            bot,
+            handle_signals=False,
+            tasks_concurrency_limit=CONCURRENT_UPDATES_LIMIT,
+        )
     finally:
         await bot.session.close()
 
