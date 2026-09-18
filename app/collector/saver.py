@@ -137,11 +137,17 @@ async def save_message(bot, message):
     if created:
         attachment = await download_attachment(bot, message, telegram_chat_id)
         if attachment is not None:
-            file_type, file_path, original_filename = attachment
+            file_type, file_path, original_filename, file_size, duration = attachment
             db = SessionLocal()
             try:
                 crud.create_attachment(
-                    db, message_pk, file_type, file_path, original_filename
+                    db,
+                    message_pk,
+                    file_type,
+                    file_path,
+                    original_filename,
+                    file_size,
+                    duration,
                 )
             finally:
                 db.close()

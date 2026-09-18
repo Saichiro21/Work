@@ -188,12 +188,23 @@ def update_message_text(db: Session, message_id, new_text, edited_at):
     return message
 
 
-def create_attachment(db: Session, message_id, file_type, file_path, original_filename):
+def create_attachment(
+    db: Session,
+    message_id,
+    file_type,
+    file_path,
+    original_filename,
+    file_size=None,
+    duration_seconds=None,
+):
+    """file_path пустой — файл не скачался, но вложение в сообщении было."""
     attachment = Attachment(
         message_id=message_id,
         file_type=file_type,
         file_path=file_path,
         original_filename=original_filename,
+        file_size=file_size,
+        duration_seconds=duration_seconds,
     )
     db.add(attachment)
     db.commit()
