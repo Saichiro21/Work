@@ -155,8 +155,12 @@ class Attachment(Base):
     id = Column(Integer, primary_key=True)
     message_id = Column(Integer, ForeignKey("messages.id"), nullable=False)
     file_type = Column(String, nullable=False)
-    file_path = Column(String, nullable=False)
+    # Пусто, если файл скачать не удалось: сам факт вложения всё равно важен для аудита
+    file_path = Column(String)
     original_filename = Column(String)
+    file_size = Column(BigInteger)
+    # Только у того, что играется: голосовых, кружков, видео и аудио
+    duration_seconds = Column(Integer)
 
     message = relationship("Message", back_populates="attachments")
 
