@@ -44,7 +44,7 @@ from app.admin_bot.handlers.common import (
 )
 from app.db.crud import get_messages_by_period
 from app.db.db import SessionLocal
-from app.paths import ATTACHMENTS_DIR, BASE_DIR
+from app.paths import resolve_attachment
 
 logger = logging.getLogger(__name__)
 
@@ -114,14 +114,6 @@ def voice_keyboard():
     return builder.as_markup()
 
 
-def _resolve(file_path):
-    """Путь из БД должен вести внутрь storage/attachments и никуда больше."""
-    path = (BASE_DIR / file_path).resolve()
-    if ATTACHMENTS_DIR.resolve() not in path.parents:
-        return None
-    return path
-
-
 def _counts(messages):
     """Сколько вложений каждого типа в периоде: с этим выбор типа осмысленный."""
     counts = {}
@@ -167,7 +159,7 @@ def _collect(messages, kinds):
                 not_saved.append((name, attachment.file_size))
                 continue
 
-            path = _resolve(attachment.file_path)
+            path = resolve_attachment(attachment.file_path)
             if path is None:
                 logger.warning(
                     "Путь вложения ведёт за пределы storage/attachments: %s",

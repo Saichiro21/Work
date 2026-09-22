@@ -180,6 +180,14 @@ def format_date(value):
     return moment.strftime("%d.%m.%Y")
 
 
+def format_time(value):
+    """Время без даты: на HTML-странице дата стоит разделителем между днями."""
+    moment = to_display(value)
+    if moment is None:
+        return None
+    return moment.strftime("%H:%M")
+
+
 def _rounded(value):
     """Число с десятыми, но без пустого хвоста: 467,4 и 52, а не 467 и 52,0."""
     return f"{value:.1f}".rstrip("0").rstrip(".").replace(".", ",")

@@ -11,7 +11,7 @@ from app.admin_bot.handlers.common import (
     format_size,
     sender_name,
 )
-from app.db.models import ChatEventType, ForwardOriginType
+from app.db.models import ChatEventType, ForwardOriginType, Message
 
 # Текст родительского сообщения в ответе даём отрывком: целиком он и так есть в выгрузке
 REPLY_PREVIEW_LIMIT = 120
@@ -85,7 +85,7 @@ def _forward_info(message):
     }
 
 
-def _event_label(event):
+def event_label(event):
     """Вход и выход читаются по-разному: человек сделал это сам или это сделали с ним."""
     same_person = event.actor_user_id == event.target_user_id
 
@@ -101,7 +101,7 @@ def _event_label(event):
 def serialize_event(event):
     return {
         "тип": "служебное событие",
-        "событие": _event_label(event),
+        "событие": event_label(event),
         "дата": format_datetime(event.happened_at),
         "кто": sender_name(event.actor) or UNKNOWN_SENDER,
         "с кем": sender_name(event.target) or "никого",
@@ -150,17 +150,31 @@ def serialize_message(message, by_telegram_id):
     }
 
 
-def timeline(messages, events=()):
-    """Сообщения и служебные события одной хронологией, как в самом Telegram."""
-    by_telegram_id = {item.telegram_message_id: item for item in messages}
+def moment(item):
+    """Время записи: у сообщения своё поле, у события своё."""
+    return item.sent_at if isinstance(item, Message) else item.happened_at
 
-    records = [
-        (item.sent_at, item.telegram_message_id, serialize_message(item, by_telegram_id))
-        for item in messages
-    ]
-    records += [
-        (event.happened_at, event.telegram_message_id, serialize_event(event))
-        for event in events
-    ]
+
+def chronology(messages, events=()):
+    """Сообщения и служебные события одним списком, как в самом Telegram.
+
+    Порядок нужен и JSON-выгрузке, и HTML-странице, поэтому считается он один
+    раз тут: разъехавшиеся хронологии в двух форматах одних и тех же данных
+    выглядели бы как потерянные сообщения.
+    """
+    records = [(moment(item), item.telegram_message_id or 0, item) for item in messages]
+    records += [(moment(event), event.telegram_message_id or 0, event) for event in events]
     records.sort(key=lambda record: (record[0], record[1]))
     return [record[2] for record in records]
+
+
+def timeline(messages, events=()):
+    """Выгрузка в JSON: та же хронология, разобранная по русским ключам."""
+    by_telegram_id = {item.telegram_message_id: item for item in messages}
+
+    return [
+        serialize_message(item, by_telegram_id)
+        if isinstance(item, Message)
+        else serialize_event(item)
+        for item in chronology(messages, events)
+    ]
