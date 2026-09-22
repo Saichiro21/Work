@@ -4,6 +4,7 @@ import logging
 import os
 import re
 from datetime import datetime, time, timezone
+from pathlib import Path
 from functools import lru_cache
 from html import escape
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -22,7 +23,6 @@ DATE_PART = r"(\d{2}\.\d{2}\.\d{4})"
 PERIOD_PATTERN = re.compile(rf"^{DATE_PART}(?:\s*-\s*{DATE_PART})?$")
 DATE_INPUT_FORMAT = "%d.%m.%Y"
 
-DEFAULT_TIMEZONE = "Europe/Moscow"
 DATETIME_FORMAT = "%d.%m.%Y %H:%M:%S"
 FILENAME_DATE_FORMAT = "%d-%m-%Y"
 
@@ -95,15 +95,32 @@ class PeriodError(ValueError):
     """Текст ошибки уже готов к отправке пользователю."""
 
 
+def machine_timezone():
+    """Пояс самой машины: в нём человек видит время и в своём Telegram."""
+    path = Path("/etc/timezone")
+    if path.is_file():
+        name = path.read_text(encoding="utf-8").strip()
+        try:
+            return ZoneInfo(name)
+        except (ZoneInfoNotFoundError, ValueError):
+            logger.warning("Система назвала неизвестный пояс %r", name)
+
+    # Имени нет — остаётся текущий сдвиг машины, он же обычно и нужен
+    return datetime.now().astimezone().tzinfo or timezone.utc
+
+
 @lru_cache(maxsize=1)
 def display_timezone():
     """Пояс, в котором показываем время. В базе оно всегда хранится в UTC."""
-    name = os.getenv("DISPLAY_TIMEZONE") or DEFAULT_TIMEZONE
+    name = os.getenv("DISPLAY_TIMEZONE")
+    if not name:
+        return machine_timezone()
+
     try:
         return ZoneInfo(name)
     except (ZoneInfoNotFoundError, ValueError):
-        logger.warning("Неизвестный DISPLAY_TIMEZONE=%r, показываем время в UTC", name)
-        return timezone.utc
+        logger.warning("Неизвестный DISPLAY_TIMEZONE=%r, берём пояс машины", name)
+        return machine_timezone()
 
 
 def to_display(value):
@@ -135,13 +152,20 @@ def format_date(value):
     return moment.strftime("%d.%m.%Y")
 
 
+def _rounded(value):
+    """Число с десятыми, но без пустого хвоста: 467,4 и 52, а не 467 и 52,0."""
+    return f"{value:.1f}".rstrip("0").rstrip(".").replace(".", ",")
+
+
 def format_size(size_bytes):
     """Размер файла словами. Старые вложения писались без размера."""
     if size_bytes is None:
         return "неизвестен"
+    if size_bytes < 1024:
+        return f"{size_bytes} Б"
     if size_bytes < 1024 * 1024:
-        return f"{size_bytes / 1024:.0f} КБ"
-    return f"{size_bytes / (1024 * 1024):.1f} МБ"
+        return f"{_rounded(size_bytes / 1024)} КБ"
+    return f"{_rounded(size_bytes / (1024 * 1024))} МБ"
 
 
 def format_duration(seconds):

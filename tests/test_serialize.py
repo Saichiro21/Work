@@ -175,7 +175,7 @@ def test_не_скачанный_файл_виден_в_выгрузке():
 
     assert result["список вложений"] != "вложений нет"
     assert attachment["имя файла"] == "совещание.mp4"
-    assert attachment["размер"] == "45.0 МБ"
+    assert attachment["размер"] == "45 МБ"
     assert "не сохранён" in attachment["файл"]
 
 
