@@ -16,6 +16,7 @@ from app.admin_bot.handlers.common import (
     CHAT_LIST_CALLBACK,
     CHAT_QUESTION_CALLBACK,
     MENU_CALLBACK,
+    NOT_A_COMMAND,
     NO_CHATS_MESSAGE,
     PERIOD_CALLBACK,
     PeriodError,
@@ -83,6 +84,9 @@ VOICE_NO_CALLBACK = "files:voice:no"
 
 
 class FilesStates(StatesGroup):
+    # Подпись окна выбора чата: по ней видно, какая команда его открыла
+    label = "/files — архив с вложениями"
+
     waiting_chat_id = State()
     waiting_period = State()
     waiting_types = State()
@@ -324,7 +328,7 @@ async def choose_chat(callback: CallbackQuery, state: FSMContext, bot: Bot):
     await show_period_question(bot, callback.from_user.id, state)
 
 
-@router.message(StateFilter(FilesStates.waiting_chat_id))
+@router.message(StateFilter(FilesStates.waiting_chat_id), NOT_A_COMMAND)
 async def receive_chat_id(message: Message, state: FSMContext, bot: Bot):
     try:
         telegram_chat_id = int((message.text or "").strip())
@@ -343,7 +347,7 @@ async def receive_chat_id(message: Message, state: FSMContext, bot: Bot):
     await show_period_question(bot, message.chat.id, state, answers=message.message_id)
 
 
-@router.message(StateFilter(FilesStates.waiting_period))
+@router.message(StateFilter(FilesStates.waiting_period), NOT_A_COMMAND)
 async def receive_period(message: Message, state: FSMContext, bot: Bot):
     try:
         date_from, date_to, file_label, text_label = parse_period(message.text)
@@ -542,7 +546,9 @@ async def back_to_types(callback: CallbackQuery, state: FSMContext, bot: Bot):
     await callback.answer()
 
 
-@router.message(StateFilter(FilesStates.waiting_types, FilesStates.waiting_voice))
+@router.message(
+    StateFilter(FilesStates.waiting_types, FilesStates.waiting_voice), NOT_A_COMMAND
+)
 async def ignore_typing(message: Message, bot: Bot):
     """На этих экранах отвечают кнопкой, поэтому присланный текст убираем.
 

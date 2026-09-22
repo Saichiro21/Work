@@ -15,6 +15,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.methods import DeleteMessage, EditMessageText
 
 from app.admin_bot.handlers import common
+from app.admin_bot.handlers.export import ExportStates
 from app.admin_bot.handlers.common import (
     BAD_CHAT_ID,
     CHAT_QUESTION,
@@ -25,17 +26,34 @@ from app.admin_bot.handlers.common import (
     START_MESSAGE,
     STEPS_KEY,
     UNKNOWN_COMMAND,
-    forget_menu,
+    chat_question_text,
+    open_dialog,
     open_menu,
     reject_bad_chat_id,
     reject_period,
     show_screen,
 )
+from app.admin_bot.handlers.files import FilesStates
 
 CHAT_ID = 777
 
-# Экраны выбора чата переключают состояние диалога, а какое именно — тут не важно
-STATES = SimpleNamespace(waiting_chat_id=None)
+
+# Вместо наборов состояний aiogram: диалогу нужны имя класса, подпись окна
+# и шаг выбора чата
+class STATES:
+    label = "/первая — выгрузка"
+
+    waiting_chat_id = None
+
+
+class OTHER_STATES:
+    label = "/вторая — выгрузка"
+
+    waiting_chat_id = None
+
+
+# Окно выбора чата, каким его присылает диалог STATES
+QUESTION = chat_question_text(STATES)
 
 
 class FakeBot:
@@ -267,21 +285,90 @@ class FakeMessage:
         return await self._bot.send_message(CHAT_ID, text, reply_markup=reply_markup)
 
 
-def test_повторный_start_не_плодит_меню(bot, state):
-    """Пока меню на виду, прежнее убирается вместе с вызвавшими его командами."""
-    asyncio.run(state.update_data(menu_message_id=5, commands=[7]))
+def test_повторный_start_оставляет_прежнее_меню(bot, state):
+    """Команду бот убрать не может, и она повисла бы над пустым местом."""
+    asyncio.run(state.update_data(menu_message_id=5, commands=[7], steps=[[6, None]]))
 
     asyncio.run(open_menu(bot, FakeMessage(bot, 100), state))
 
-    assert bot.deleted == [5, 7]
+    assert bot.deleted == []
+    # У брошенного экрана диалога сняты кнопки: живое окно в переписке одно
+    assert bot.buttons_dropped == [6]
     assert bot.sent[-1][1] == START_MESSAGE
+
+
+def open_command(bot, state, message_id=100):
+    asyncio.run(open_dialog(bot, FakeMessage(bot, message_id), state, STATES))
+
+
+def test_команда_под_меню_оставляет_его_для_возврата(bot, state):
+    asyncio.run(state.update_data(menu_message_id=5))
+
+    open_command(bot, state)
+
+    data = asyncio.run(state.get_data())
+    assert data["menu_message_id"] == 5
+    assert data["commands"] == [100]
+    assert bot.deleted == []
+
+
+def test_команда_под_брошенным_окном_открывает_новое(bot, state):
+    """Прежнее окно убрать нельзя: вызвавшая его команда осталась бы ни при чём."""
+    asyncio.run(state.update_data(menu_message_id=5, steps=[[6, None]], commands=[7]))
+
+    open_command(bot, state, message_id=101)
+
+    data = asyncio.run(state.get_data())
+    assert bot.deleted == []
+    assert bot.buttons_dropped == [6]
+    assert bot.sent == [(1, QUESTION)]
+    assert data[STEPS_KEY] == [[1, None]]
+    # Меню осталось выше брошенного окна: возвращаться туда уже некуда
+    assert data["menu_message_id"] is None
+    assert data["commands"] == [101]
+
+
+def test_своя_команда_во_время_диалога_ничего_не_меняет(bot, state):
+    """Открытое окно ведёт туда же: второе такое же только запутает."""
+    open_command(bot, state)
+
+    open_command(bot, state, message_id=101)
+
+    assert bot.deleted == [101]
+    assert bot.sent == [(1, QUESTION)]
+    assert steps(state) == [[1, None]]
+
+
+def test_окна_двух_команд_подписаны_по_разному(bot, state):
+    """Стоя рядом в переписке, они отличаются только подписью."""
+    open_command(bot, state)
+    asyncio.run(open_dialog(bot, FakeMessage(bot, 101), state, OTHER_STATES))
+
+    (_, first), (_, second) = bot.sent
+    assert CHAT_QUESTION in first and STATES.label in first
+    assert CHAT_QUESTION in second and OTHER_STATES.label in second
+
+
+def test_у_каждого_диалога_своя_подпись():
+    """Диалог без подписи уронил бы окно выбора чата, а диалог с чужой — запутал."""
+    assert ExportStates.label != FilesStates.label
+
+
+def test_чужая_команда_во_время_диалога_открывает_своё_окно(bot, state):
+    """Окно выглядит так же, но ведёт к другой выгрузке — нужно новое."""
+    open_command(bot, state)
+
+    asyncio.run(open_dialog(bot, FakeMessage(bot, 101), state, OTHER_STATES))
+
+    assert bot.deleted == []
+    assert bot.buttons_dropped == [1]
+    assert steps(state) == [[2, None]]
 
 
 def test_неизвестная_команда_не_трогает_то_что_выше(bot, state):
     """Непонятный ввод бот не присылал, вырезать его из переписки он не может."""
     asyncio.run(state.update_data(menu_message_id=5, commands=[7]))
 
-    asyncio.run(forget_menu(state))
     asyncio.run(open_menu(bot, FakeMessage(bot, 100), state, UNKNOWN_COMMAND))
 
     assert bot.deleted == []
@@ -290,7 +377,7 @@ def test_неизвестная_команда_не_трогает_то_что_�
 
 
 def test_команды_перечислены_в_одном_месте():
-    """Своя копия списка команд уже однажды отстала и потеряла /search."""
+    """Своя копия списка команд уже однажды отстала от настоящего меню."""
     assert COMMANDS_LIST in START_MESSAGE
     assert COMMANDS_LIST in UNKNOWN_COMMAND
 
@@ -304,4 +391,4 @@ def test_если_чаты_исчезли_показываем_первый_эк
     reject(bot, state)
 
     # Открыт был список, поэтому текст про формат номера, а экран — первый
-    assert bot.edited[-1] == (1, f"{BAD_CHAT_ID}\n\n{CHAT_QUESTION}")
+    assert bot.edited[-1] == (1, chat_question_text(STATES, BAD_CHAT_ID))

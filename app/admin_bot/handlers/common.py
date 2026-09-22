@@ -10,6 +10,7 @@ from html import escape
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
+from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app.db.crud import get_chats_overview
@@ -37,6 +38,14 @@ PERIOD_CALLBACK = "nav:period"
 # экран и что бот вправе убрать, если диалог закрывается, не оставив следа
 STEPS_KEY = "steps"
 COMMANDS_KEY = "commands"
+
+# Чей диалог сейчас открыт: повторная своя команда не должна открывать второе
+# такое же окно, а чужая — должна
+DIALOG_KEY = "dialog"
+
+# Команда остаётся командой на любом шаге. Без этого шаг диалога забирал бы её
+# себе: /files внутри /export был бы принят за номер чата и молча стёрт
+NOT_A_COMMAND = ~Command("start", "export", "files", ignore_case=True)
 
 # Чат выбирают на одном из трёх экранов. Какой открыт — нужно знать, чтобы
 # ошибка ввода показалась там же, а не перебрасывала человека на другой
@@ -223,6 +232,19 @@ def chats_overview():
         db.close()
 
 
+def chat_question_text(states, notice=None):
+    """Первый экран выбора чата, подписанный своей командой.
+
+    Окна /export и /files спрашивают одно и то же и могут стоять в переписке
+    рядом — если вызвать вторую команду, не закрыв первую. Подпись берём у
+    набора состояний: он у каждого диалога свой, а значит, и не разъедется.
+    """
+    parts = [f"<b>{states.label}</b>", CHAT_QUESTION]
+    if notice is not None:
+        parts.insert(1, notice)
+    return "\n\n".join(parts)
+
+
 def chat_question_keyboard():
     """Первый экран выбора: оба способа найти чат и выход к командам."""
     builder = InlineKeyboardBuilder()
@@ -374,40 +396,47 @@ def _menu_in_sight(data):
     )
 
 
-async def _clear_steps(bot, chat_id, data):
-    """Закрывает экраны прошлого диалога.
-
-    Пока меню на виду, экраны удаляем целиком — диалог не оставляет следа. Иначе
-    они уже часть истории: у них только снимаются кнопки, чтобы живое окно в
-    переписке было одно.
-    """
-    removable = _menu_in_sight(data)
-    for screen_message_id, _ in _steps(data):
-        if removable:
-            await delete_message(bot, chat_id, screen_message_id)
-        else:
-            await _drop_buttons(bot, chat_id, screen_message_id)
-    return removable
-
-
 async def open_dialog(bot, message, state, states):
-    """Первый экран диалога. Команда и меню над ним остаются на месте.
+    """Первый экран диалога. Всё, что выше команды, остаётся на месте.
 
-    Команду запоминаем: если из первого окна уйти «Назад», она уберётся вместе с
-    окном и на виду останется одно меню.
+    Брошенный диалог не убираем: команда, которую бот не может стереть заодно с
+    окном, повисла бы над пустым местом. Прежние окна только теряют кнопки —
+    живым в переписке остаётся одно. Зато меню, если между ним и новым окном
+    осталось брошенное, больше не переиспользуем: возвращаться туда некуда.
+
+    Команду запоминаем: если из первого окна уйти «Назад», она уберётся вместе
+    с окном и на виду снова останется меню.
     """
     data = await state.get_data()
     chat_id = message.chat.id
-    commands = data.get(COMMANDS_KEY, []) if _menu_in_sight(data) else []
-    await _clear_steps(bot, chat_id, data)
+    # Диалог зовём по его набору состояний: у /export и /files они разные
+    started_by = states.__name__
+
+    # Та же команда во время своего же диалога: открытое окно ведёт ровно туда
+    # же, и второе такое же только запутает. Команду убираем — на экране всё
+    # остаётся как было. Чужая команда открывает своё окно: диалоги-то разные
+    if data.get(DIALOG_KEY) == started_by and _steps(data):
+        await delete_message(bot, chat_id, message.message_id)
+        return
+
+    abandoned = bool(_steps(data)) or data.get("file_message_id") is not None
+
+    for screen_message_id, _ in _steps(data):
+        await _drop_buttons(bot, chat_id, screen_message_id)
     await _drop_buttons(bot, chat_id, data.get("file_message_id"))
 
-    screen = await message.answer(CHAT_QUESTION, reply_markup=chat_question_keyboard())
+    screen = await message.answer(
+        chat_question_text(states),
+        reply_markup=chat_question_keyboard(),
+        parse_mode="HTML",
+    )
     await state.set_state(states.waiting_chat_id)
     await state.update_data(
+        dialog=started_by,
         steps=[[screen.message_id, None]],
-        commands=list(commands) + [message.message_id],
+        commands=[message.message_id],
         file_message_id=None,
+        menu_message_id=None if abandoned else data.get("menu_message_id"),
     )
 
 
@@ -485,7 +514,6 @@ async def show_screen(
 async def show_chat_question(
     bot, chat_id, state, states, notice=None, answers=None, back=False
 ):
-    text = CHAT_QUESTION if notice is None else f"{notice}\n\n{CHAT_QUESTION}"
     await state.set_state(states.waiting_chat_id)
     # Здесь только кнопки: номер чата человек может прислать, но его не просят
     await state.update_data(chat_screen=QUESTION_SCREEN, chat_asks_id=False)
@@ -493,8 +521,9 @@ async def show_chat_question(
         bot,
         chat_id,
         state,
-        text,
+        chat_question_text(states, notice),
         chat_question_keyboard(),
+        parse_mode="HTML",
         answers=answers,
         back=back,
     )
@@ -626,31 +655,23 @@ async def show_empty_result(bot, chat_id, state, text, answers):
     )
 
 
-async def forget_menu(state):
-    """Прежнее меню больше не переиспользовать: под ним появился чужой текст.
-
-    Пока ниже меню только команды и экраны диалога, бот вправе всё это убрать и
-    оставить одно живое окно. Сообщение, которого он не присылал, так не уберёшь,
-    поэтому такое меню становится историей и остаётся в переписке.
-    """
-    await state.update_data(menu_message_id=None)
-
-
 async def open_menu(bot, message, state, text=START_MESSAGE):
     """Меню по команде /start: она уже внизу переписки, поэтому меню присылаем новым.
 
-    Прежнее меню и следы диалога убираем, если они ещё были последними, — иначе
-    список команд задвоится. В text передают, чем меню открывается: приветствием
-    или объяснением, почему присланное не подошло, — команды в нём те же.
+    Выше команды не трогаем ничего. Прежнее меню бот убрать мог бы, а саму
+    команду — нет: она бы осталась висеть над пустым местом, и от нескольких
+    /start подряд получался бы столбик команд с одним меню внизу. Прежние окна
+    только теряют кнопки, чтобы живым в переписке было одно.
+
+    В text передают, чем меню открывается: приветствием или объяснением, почему
+    присланное не подошло, — команды в нём те же.
     """
     data = await state.get_data()
     chat_id = message.chat.id
     await state.clear()
 
-    if await _clear_steps(bot, chat_id, data):
-        await delete_message(bot, chat_id, data.get("menu_message_id"))
-        for command_message_id in data.get(COMMANDS_KEY, []):
-            await delete_message(bot, chat_id, command_message_id)
+    for screen_message_id, _ in _steps(data):
+        await _drop_buttons(bot, chat_id, screen_message_id)
     await _drop_buttons(bot, chat_id, data.get("file_message_id"))
 
     menu = await message.answer(text)
