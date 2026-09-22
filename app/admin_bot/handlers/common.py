@@ -32,7 +32,6 @@ CHAT_QUESTION_CALLBACK = "nav:chat"
 CHAT_LIST_CALLBACK = "nav:list"
 CHAT_IDS_CALLBACK = "nav:ids"
 PERIOD_CALLBACK = "nav:period"
-KEYWORD_CALLBACK = "nav:keyword"
 
 # Шаги открытого диалога и команды, которые его вызвали, — из чего складывается
 # экран и что бот вправе убрать, если диалог закрывается, не оставив следа
@@ -57,8 +56,7 @@ MAX_CHAT_BUTTONS = 20
 # и ответ на неизвестную команду, а две копии однажды уже разъехались
 COMMANDS_LIST = (
     "/export — JSON с сообщениями выбранного чата за период.\n"
-    "/files — архив с вложениями этих сообщений.\n"
-    "/search — поиск по слову: кто и когда о нём писал."
+    "/files — архив с вложениями этих сообщений."
 )
 
 START_MESSAGE = (

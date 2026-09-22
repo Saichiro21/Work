@@ -9,7 +9,6 @@ from app.admin_bot.handlers.export import router as export_router
 from app.admin_bot.handlers.fallback import router as fallback_router
 from app.admin_bot.handlers.files import router as files_router
 from app.admin_bot.handlers.menu import router as menu_router
-from app.admin_bot.handlers.search import router as search_router
 from app.admin_bot.middlewares import AdminMiddleware
 from app.db.crud import add_admin
 from app.db.db import SessionLocal, init_tables
@@ -41,7 +40,6 @@ def create_admin_bot():
     dp.include_router(menu_router)
     dp.include_router(export_router)
     dp.include_router(files_router)
-    dp.include_router(search_router)
     # Перехватывает всё подряд, поэтому строго последним
     dp.include_router(fallback_router)
     return bot, dp
