@@ -6,6 +6,7 @@
 import logging
 from datetime import datetime, timezone
 
+from app.collector.dedup import share_existing
 from app.collector.media import detect_attachment, download_attachment
 from app.db import crud
 from app.db.db import SessionLocal
@@ -140,6 +141,7 @@ async def save_message(bot, message):
             file_type, file_path, original_filename, file_size, duration = attachment
             db = SessionLocal()
             try:
+                file_path, sha256 = share_existing(db, file_path)
                 crud.create_attachment(
                     db,
                     message_pk,
@@ -148,6 +150,7 @@ async def save_message(bot, message):
                     original_filename,
                     file_size,
                     duration,
+                    sha256=sha256,
                 )
             finally:
                 db.close()

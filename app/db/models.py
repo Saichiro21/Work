@@ -161,6 +161,9 @@ class Attachment(Base):
     file_size = Column(BigInteger)
     # Только у того, что играется: голосовых, кружков, видео и аудио
     duration_seconds = Column(Integer)
+    # SHA-256 содержимого. Одинаковые файлы лежат на диске в одном экземпляре,
+    # и file_path у их записей совпадает. Пусто, если файла нет
+    sha256 = Column(String(64), index=True)
 
     message = relationship("Message", back_populates="attachments")
 

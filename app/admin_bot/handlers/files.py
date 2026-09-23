@@ -2,6 +2,7 @@ import asyncio
 import io
 import logging
 import zipfile
+from pathlib import PurePath
 
 from aiogram import Bot, F, Router
 from aiogram.filters import Command, StateFilter
@@ -132,6 +133,20 @@ def _counts_text(counts, period_label):
     return "\n".join([TYPES_PROMPT, "", header] + lines)
 
 
+def _archive_name(message, attachment, path):
+    """Имя файла в архиве — по сообщению, а не по файлу на диске.
+
+    Одинаковые вложения разных сообщений делят один файл, и по его имени
+    они стали бы в архиве тёзками. Для файла, который ни с кем не делится,
+    имя выходит то же, что у него на диске.
+    """
+    if attachment.original_filename:
+        name = PurePath(attachment.original_filename).name
+    else:
+        name = f"{attachment.file_type}{path.suffix}"
+    return f"{message.telegram_message_id}_{name}"
+
+
 def _collect(messages, kinds):
     """Разбирает вложения периода: отправляемые, не скачанные, пропавшие, большие.
 
@@ -169,19 +184,20 @@ def _collect(messages, kinds):
                 missing.append(attachment.file_path)
                 continue
 
+            name = _archive_name(message, attachment, path)
             size = path.stat().st_size
             if size > MAX_ARCHIVE_BYTES:
-                oversized.append((path.name, size))
+                oversized.append((name, size))
                 continue
 
-            arcname = f"{day}/{path.name}"
+            arcname = f"{day}/{name}"
             description = " | ".join(
                 [
                     sent,
                     sender_name(message.user) or "автор неизвестен",
                     file_type_label(attachment.file_type),
                     arcname,
-                    attachment.original_filename or path.name,
+                    attachment.original_filename or name,
                 ]
             )
             found.append((arcname, path, size, description))

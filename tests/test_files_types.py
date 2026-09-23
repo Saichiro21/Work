@@ -6,6 +6,7 @@
 
 from datetime import datetime
 
+from app import paths
 from app.admin_bot.handlers import files
 from app.admin_bot.handlers.common import FILE_TYPE_LABELS
 from app.db.models import Attachment, Message
@@ -73,3 +74,27 @@ def test_о_невыбранных_типах_не_сообщаем():
     _, _, _, not_saved = files._collect(messages, files.DOCUMENT_TYPES)
 
     assert [name for name, _ in not_saved] == ["документ"]
+
+
+def test_общий_файл_в_архиве_под_именем_своего_сообщения(tmp_path, monkeypatch):
+    """После дедупликации два сообщения делят файл, но в архиве тёзками не становятся."""
+    directory = tmp_path / "storage" / "attachments"
+    directory.mkdir(parents=True)
+    (directory / "3_photo.jpg").write_bytes(b"jpg")
+    monkeypatch.setattr(paths, "BASE_DIR", tmp_path)
+    monkeypatch.setattr(paths, "ATTACHMENTS_DIR", directory)
+    shared = "storage/attachments/3_photo.jpg"
+
+    first = message_with(Attachment(file_type="photo", file_path=shared))
+    first.telegram_message_id = 3
+    second = message_with(
+        Attachment(file_type="photo", file_path=shared, original_filename="фасад.jpg")
+    )
+    second.telegram_message_id = 8
+
+    found, _, _, _ = files._collect([first, second], files.PICTURE_TYPES)
+
+    assert [arcname for arcname, _, _, _ in found] == [
+        "2026-09-01/3_photo.jpg",
+        "2026-09-01/8_фасад.jpg",
+    ]

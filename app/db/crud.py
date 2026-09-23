@@ -196,6 +196,7 @@ def create_attachment(
     original_filename,
     file_size=None,
     duration_seconds=None,
+    sha256=None,
 ):
     """file_path пустой — файл не скачался, но вложение в сообщении было."""
     attachment = Attachment(
@@ -205,11 +206,41 @@ def create_attachment(
         original_filename=original_filename,
         file_size=file_size,
         duration_seconds=duration_seconds,
+        sha256=sha256,
     )
     db.add(attachment)
     db.commit()
     db.refresh(attachment)
     return attachment
+
+
+def get_attachment_paths_by_sha256(db: Session, sha256):
+    """Пути, под которыми уже лежит файл с таким содержимым, старые первыми."""
+    rows = (
+        db.query(Attachment.file_path)
+        .filter(Attachment.sha256 == sha256, Attachment.file_path.isnot(None))
+        .order_by(Attachment.id)
+        .all()
+    )
+    return list(dict.fromkeys(path for (path,) in rows))
+
+
+def is_attachment_path_used(db: Session, file_path):
+    """Общий файл можно стирать с диска, только когда на него не ссылается никто."""
+    return (
+        db.query(Attachment.id).filter(Attachment.file_path == file_path).first()
+        is not None
+    )
+
+
+def get_unhashed_attachments(db: Session):
+    """Вложения со скачанным файлом, сохранённые до появления дедупликации."""
+    return (
+        db.query(Attachment)
+        .filter(Attachment.sha256.is_(None), Attachment.file_path.isnot(None))
+        .order_by(Attachment.id)
+        .all()
+    )
 
 
 def get_or_create_chat_event(
